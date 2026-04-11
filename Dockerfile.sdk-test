@@ -32,6 +32,11 @@ COPY wolfcrypt-test/se05x_reset.c /app/simw-top/hostlib/hostLib/platform/rsp/se0
 COPY wolfcrypt-test/patch_ftr.py /tmp/patch_ftr.py
 RUN python3 /tmp/patch_ftr.py /app/simw-top/fsl_sss_ftr.h
 
+# Disable HOSTCRYPTO_NONE for RSA sign path (must be 0 for EMSA encode)
+RUN sed -i 's/HOSTCRYPTO_NONE 1/HOSTCRYPTO_NONE 0/g' /app/simw-top/fsl_sss_ftr.h && \
+    echo "=== HOSTCRYPTO_NONE ===" && \
+    grep 'define SSS_HAVE_HOSTCRYPTO_NONE' /app/simw-top/fsl_sss_ftr.h
+
 # Build SDK libraries
 COPY wolfcrypt-test/CMakeLists.txt /app/simw-top/CMakeLists.txt
 RUN mkdir -p /app/simw-top/build && cd /app/simw-top/build && \
@@ -41,13 +46,14 @@ RUN mkdir -p /app/simw-top/build && cd /app/simw-top/build && \
       -DPTMW_Applet=SE05X_C \
       -DPTMW_SE05X_Auth=None \
       -DPTMW_SMCOM=T1oI2C \
-      -DPTMW_HostCrypto=None \
+      -DPTMW_HostCrypto=OPENSSL \
       -DPTMW_Host=LinuxLike \
     2>&1 && \
     cmake --build . -j$(nproc) 2>&1
 
-# Copy fsl_sss_ftr.h to build/
-RUN cp /app/simw-top/fsl_sss_ftr.h /app/simw-top/build/
+# Copy patched fsl_sss_ftr.h to build/ and ensure HOSTCRYPTO_NONE=0
+RUN cp /app/simw-top/fsl_sss_ftr.h /app/simw-top/build/ && \
+    sed -i 's/SSS_HAVE_HOSTCRYPTO_NONE 1/SSS_HAVE_HOSTCRYPTO_NONE 0/g' /app/simw-top/build/fsl_sss_ftr.h
 
 # Symlink for linker
 RUN ln -sf /app/simw-top/build/sss/ex/src/libex_common.a /app/simw-top/build/sss/libex_common.a

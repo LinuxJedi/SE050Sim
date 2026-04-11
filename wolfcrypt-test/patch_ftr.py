@@ -20,6 +20,13 @@ for feat in ['EC_NIST_192', 'EC_NIST_224', 'EC_NIST_521', 'EC_BP', 'EC_NIST_K', 
     content = re.sub(pattern1, '/* undef SSS_HAVE_' + feat + ' disabled */', content)
     content = re.sub(pattern2, '#define SSS_HAVE_' + feat + ' 1 /* was 0 */', content)
 
+# Disable HOSTCRYPTO_NONE so RSA sign paths are compiled
+pattern_hcn = r'#\s*define\s+SSS_HAVE_HOSTCRYPTO_NONE\s+1\b'
+if re.search(pattern_hcn, content):
+    content = re.sub(pattern_hcn, '#define SSS_HAVE_HOSTCRYPTO_NONE 0 /* was 1 */', content)
+    count += 1
+    print('  HOSTCRYPTO_NONE: disabled')
+
 if content != original:
     with open(path, 'w') as f:
         f.write(content)

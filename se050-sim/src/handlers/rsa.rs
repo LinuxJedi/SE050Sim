@@ -227,7 +227,7 @@ pub fn handle_rsa_decrypt(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRes
         Err(_) => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
     };
 
-    let plaintext = match algo {
+    let result = match algo {
         0x0A => private_key.decrypt(Pkcs1v15Encrypt, ciphertext).ok(),
         0x0F => {
             use rsa::Oaep;
@@ -235,11 +235,31 @@ pub fn handle_rsa_decrypt(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRes
                 .decrypt(Oaep::new::<sha2::Sha256>(), ciphertext)
                 .ok()
         }
+        0x0C => {
+            // NO_PAD: raw RSA private key operation (used by SDK for signing)
+            // result = ciphertext^d mod n
+            use rsa::traits::PublicKeyParts;
+            let c = rsa::BigUint::from_bytes_be(ciphertext);
+            rsa::hazmat::rsa_decrypt::<rand::rngs::OsRng>(None, &private_key, &c)
+                .ok()
+                .map(|m| {
+                    // Left-pad to modulus size
+                    let mod_size = private_key.n().bits() as usize / 8;
+                    let m_bytes = m.to_bytes_be();
+                    if m_bytes.len() < mod_size {
+                        let mut padded = vec![0u8; mod_size];
+                        padded[mod_size - m_bytes.len()..].copy_from_slice(&m_bytes);
+                        padded
+                    } else {
+                        m_bytes
+                    }
+                })
+        }
         _ => return ApduResponse::error(SW_WRONG_DATA),
     };
 
-    match plaintext {
-        Some(pt) => ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &pt)]),
+    match result {
+        Some(data) => ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &data)]),
         None => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
     }
 }

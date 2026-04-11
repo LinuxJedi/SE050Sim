@@ -36,6 +36,40 @@ pub fn dispatch(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
         },
 
         INS_READ => match (cred_type, apdu.p2) {
+            (P1_DEFAULT, P2_DEFAULT) if {
+                // Check if Tag4 is present (RSA component read)
+                let has_tag4 = apdu.parse_tlvs().map_or(false, |tlvs|
+                    crate::tlv::find_tlv(&tlvs, crate::tlv::TAG_4).is_some());
+                has_tag4
+            } => {
+                // ReadRSA: return modulus or exponent based on Tag4 component type
+                let tlvs = apdu.parse_tlvs().unwrap_or_default();
+                let obj_id = crate::tlv::find_tlv(&tlvs, crate::tlv::TAG_1)
+                    .filter(|t| t.value.len() == 4)
+                    .map(|t| { let mut id = [0u8; 4]; id.copy_from_slice(&t.value); id });
+                let component = crate::tlv::find_tlv(&tlvs, crate::tlv::TAG_4)
+                    .and_then(|t| t.value.first().copied())
+                    .unwrap_or(0);
+                match obj_id.and_then(|id| store.get(&id)) {
+                    Some(crate::object_store::types::SecureObject::RSAKeyPair { private_key_der, .. }) => {
+                        use rsa::pkcs1::DecodeRsaPrivateKey;
+                        use rsa::traits::PublicKeyParts;
+                        if let Ok(priv_key) = rsa::RsaPrivateKey::from_pkcs1_der(private_key_der) {
+                            let pub_key = rsa::RsaPublicKey::from(&priv_key);
+                            let data = match component {
+                                0x00 => pub_key.n().to_bytes_be(), // modulus
+                                0x01 => pub_key.e().to_bytes_be(), // public exponent
+                                _ => return ApduResponse::error(SW_WRONG_DATA),
+                            };
+                            ApduResponse::success_with_tlvs(
+                                &[crate::tlv::Tlv::new(crate::tlv::TAG_1, &data)])
+                        } else {
+                            ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED)
+                        }
+                    }
+                    _ => ApduResponse::error(SW_FILE_NOT_FOUND),
+                }
+            }
             (P1_CRYPTO_OBJ, _) => handlers::crypto_obj::handle_list(apdu, store),
             (P1_CURVE, P2_ID) => {
                 // EC_CurveGetId: return the curve ID for an EC key object

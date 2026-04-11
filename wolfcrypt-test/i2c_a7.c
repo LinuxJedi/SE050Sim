@@ -186,17 +186,17 @@ i2c_error_t axI2CRead(void *conn_ctx, unsigned char bus,
         }
     }
 
-    if (rxLen > 128) {
-        /* Very large read (buffer flush / NAD scan with MAX_DATA_LEN=260):
-         * read available data, zero-fill rest. */
+    if (rxLen >= 260) {
+        /* Initial buffer flush (MAX_DATA_LEN=260):
+         * read available data, zero-fill rest. Only used during init. */
         memset(pRx, 0, rxLen);
         n = read(ctx->sockfd, pRx, rxLen);
         if (n <= 0) return I2C_FAILED;
         trace_hex("READ-scan", pRx, (int)(n > 16 ? 16 : n));
     } else {
-        /* Frame data read: use read_exact to guarantee all bytes arrive.
-         * This handles both small header reads AND medium payload reads
-         * (e.g., 70-byte Ed25519 signature responses). */
+        /* All frame reads: use read_exact to guarantee all bytes arrive.
+         * Handles header reads (2-3 bytes), medium payloads (70 bytes),
+         * and large payloads (256+ bytes for multi-frame RSA responses). */
         if (read_exact(ctx->sockfd, pRx, rxLen) < 0)
             return I2C_FAILED;
         trace_hex("READ", pRx, (int)(rxLen > 16 ? 16 : rxLen));
