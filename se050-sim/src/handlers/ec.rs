@@ -119,12 +119,18 @@ fn generate_ed25519_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduRes
     let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
+    // SE050 stores Ed25519 keys reversed (BE). SDK reverses on read.
+    let mut priv_bytes = signing_key.to_bytes();
+    priv_bytes.reverse();
+    let mut pub_bytes = verifying_key.to_bytes();
+    pub_bytes.reverse();
+
     store.insert(
         obj_id,
         SecureObject::ECKeyPair {
             curve: ECCurve::Ed25519,
-            private_key: signing_key.to_bytes().to_vec(),
-            public_key: verifying_key.to_bytes().to_vec(),
+            private_key: priv_bytes.to_vec(),
+            public_key: pub_bytes.to_vec(),
         },
     );
 
@@ -135,14 +141,18 @@ fn generate_x25519_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduResp
     let secret = x25519_dalek::StaticSecret::random_from_rng(OsRng);
     let public = x25519_dalek::PublicKey::from(&secret);
 
-    // Store in native little-endian format (X25519 convention).
-    // The SE050 stores Montgomery curve keys in LE internally.
+    // SE050 stores 25519 keys reversed (BE). SDK reverses on read.
+    let mut priv_bytes = secret.to_bytes();
+    priv_bytes.reverse();
+    let mut pub_bytes = public.to_bytes();
+    pub_bytes.reverse();
+
     store.insert(
         obj_id,
         SecureObject::ECKeyPair {
             curve: ECCurve::Curve25519,
-            private_key: secret.to_bytes().to_vec(),
-            public_key: public.to_bytes().to_vec(),
+            private_key: priv_bytes.to_vec(),
+            public_key: pub_bytes.to_vec(),
         },
     );
 
@@ -273,8 +283,10 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
             if private_key.len() != 32 {
                 return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
             }
+            // Stored reversed (BE) — reverse to LE for signing
             let mut key_bytes = [0u8; 32];
             key_bytes.copy_from_slice(private_key);
+            key_bytes.reverse();
             let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
             use ed25519_dalek::Signer;
             let signature = signing_key.sign(&input_data);
@@ -359,8 +371,10 @@ pub fn handle_verify(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse
             if public_key.len() != 32 || sig_data.len() != 64 {
                 return ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[0x02])]);
             }
+            // Stored reversed (BE) — reverse to LE for verification
             let mut pk_bytes = [0u8; 32];
             pk_bytes.copy_from_slice(public_key);
+            pk_bytes.reverse();
             let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes) else {
                 return ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[0x02])]);
             };
@@ -490,11 +504,11 @@ fn x25519_ecdh(private_key: &[u8], peer_pubkey: &[u8]) -> Option<Vec<u8>> {
     if private_key.len() != 32 || peer_pubkey.len() != 32 {
         return None;
     }
-    // Private key is stored in native LE format
+    // Both stored reversed (BE) — reverse to LE for X25519
     let mut sk_bytes = [0u8; 32];
     sk_bytes.copy_from_slice(private_key);
-    // Peer public key from APDU Tag2: the SDK sends it reversed (BE)
-    // for Montgomery curves, so reverse back to LE for X25519
+    sk_bytes.reverse();
+    // Peer pubkey from Tag2 is also BE (read directly from SE050 storage)
     let mut pk_bytes = [0u8; 32];
     pk_bytes.copy_from_slice(peer_pubkey);
     pk_bytes.reverse();
