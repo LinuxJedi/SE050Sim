@@ -3,6 +3,7 @@ name = "se050-sim"
 version = "0.1.0"
 edition = "2021"
 description = "Software simulator for the NXP SE050 secure element"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 embedded-hal = "0.2"

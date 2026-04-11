@@ -233,4 +233,4 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 ## License
 
-This project is provided as-is for development and testing purposes.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
