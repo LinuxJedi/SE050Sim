@@ -1,6 +1,6 @@
 use crate::apdu::*;
 use crate::object_store::types::SecureObject;
-use crate::object_store::ObjectStore;
+use crate::object_store::{CryptoObjectState, ObjectStore};
 use crate::tlv::{self, Tlv, TAG_1, TAG_2, TAG_3, TAG_4};
 
 use aes::cipher::{BlockEncrypt, BlockDecrypt, KeyInit};
@@ -171,8 +171,147 @@ pub fn handle_decrypt_oneshot(apdu: &ParsedApdu, store: &mut ObjectStore) -> Apd
     }
 }
 
+/// Handle CipherInit (encrypt or decrypt).
+/// INS=Crypto, P1=Cipher, P2=EncryptInit(0x42)/DecryptInit(0x43)
+/// Tag1=keyObjectID(4B), Tag2=cryptoObjectID(2B), Tag4=IV(opt)
+pub fn handle_cipher_init(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
+    let encrypting = apdu.p2 == P2_ENCRYPT_INIT;
+    let tlvs = match apdu.parse_tlvs() {
+        Ok(t) => t,
+        Err(_) => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let key_id = match tlv::find_tlv(&tlvs, TAG_1) {
+        Some(t) if t.value.len() == 4 => {
+            let mut id = [0u8; 4];
+            id.copy_from_slice(&t.value);
+            id
+        }
+        _ => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let crypto_id = match tlv::find_tlv(&tlvs, TAG_2) {
+        Some(t) if t.value.len() == 2 => ((t.value[0] as u16) << 8) | (t.value[1] as u16),
+        _ => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let iv = tlv::find_tlv(&tlvs, TAG_4)
+        .map(|t| t.value.clone())
+        .unwrap_or_else(|| vec![0u8; 16]);
+
+    store.crypto_objects.insert(
+        crypto_id,
+        CryptoObjectState::Cipher {
+            encrypting,
+            key_id,
+            iv,
+            accumulated: Vec::new(),
+        },
+    );
+
+    ApduResponse::success()
+}
+
+/// Handle CipherUpdate.
+/// INS=Crypto, P1=Cipher, P2=Update(0x0C)
+/// Tag2=cryptoObjectID(2B), Tag3=inputData
+pub fn handle_cipher_update(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
+    let tlvs = match apdu.parse_tlvs() {
+        Ok(t) => t,
+        Err(_) => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let crypto_id = match tlv::find_tlv(&tlvs, TAG_2) {
+        Some(t) if t.value.len() == 2 => ((t.value[0] as u16) << 8) | (t.value[1] as u16),
+        _ => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let input = match tlv::find_tlv(&tlvs, TAG_3) {
+        Some(t) => t.value.clone(),
+        None => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    // Accumulate data - process in final
+    match store.crypto_objects.get_mut(&crypto_id) {
+        Some(CryptoObjectState::Cipher { accumulated, .. }) => {
+            accumulated.extend_from_slice(&input);
+            // For streaming cipher, we could process block-aligned chunks here.
+            // For simplicity, accumulate all and process in final.
+            ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[])])
+        }
+        _ => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+    }
+}
+
+/// Handle CipherFinal.
+/// INS=Crypto, P1=Cipher, P2=Final(0x0D)
+/// Tag2=cryptoObjectID(2B), Tag3=remainingData(opt)
+pub fn handle_cipher_final(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
+    let tlvs = match apdu.parse_tlvs() {
+        Ok(t) => t,
+        Err(_) => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let crypto_id = match tlv::find_tlv(&tlvs, TAG_2) {
+        Some(t) if t.value.len() == 2 => ((t.value[0] as u16) << 8) | (t.value[1] as u16),
+        _ => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let remaining = tlv::find_tlv(&tlvs, TAG_3).map(|t| t.value.clone());
+
+    let state = match store.crypto_objects.remove(&crypto_id) {
+        Some(s) => s,
+        None => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+    };
+
+    match state {
+        CryptoObjectState::Cipher {
+            encrypting,
+            key_id,
+            iv,
+            mut accumulated,
+        } => {
+            if let Some(rem) = remaining {
+                accumulated.extend_from_slice(&rem);
+            }
+
+            let key_obj = match store.get(&key_id) {
+                Some(obj) => obj.clone(),
+                None => return ApduResponse::error(SW_FILE_NOT_FOUND),
+            };
+
+            let key_data = match &key_obj {
+                SecureObject::AESKey { key } => key,
+                _ => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+            };
+
+            let result = if encrypting {
+                match key_data.len() {
+                    16 => aes_cbc_encrypt::<aes::Aes128>(key_data, &iv, &accumulated),
+                    24 => aes_cbc_encrypt::<aes::Aes192>(key_data, &iv, &accumulated),
+                    32 => aes_cbc_encrypt::<aes::Aes256>(key_data, &iv, &accumulated),
+                    _ => None,
+                }
+            } else {
+                match key_data.len() {
+                    16 => aes_cbc_decrypt::<aes::Aes128>(key_data, &iv, &accumulated),
+                    24 => aes_cbc_decrypt::<aes::Aes192>(key_data, &iv, &accumulated),
+                    32 => aes_cbc_decrypt::<aes::Aes256>(key_data, &iv, &accumulated),
+                    _ => None,
+                }
+            };
+
+            match result {
+                Some(output) => ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &output)]),
+                None => ApduResponse::error(SW_WRONG_DATA),
+            }
+        }
+        _ => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+    }
+}
+
 /// AES-CBC encrypt with no padding (manual CBC chaining).
-fn aes_cbc_encrypt<C>(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Option<Vec<u8>>
+pub fn aes_cbc_encrypt<C>(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Option<Vec<u8>>
 where
     C: BlockEncrypt + KeyInit,
 {

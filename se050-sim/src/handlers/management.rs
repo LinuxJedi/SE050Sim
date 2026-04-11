@@ -15,7 +15,7 @@ pub fn handle(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
 
 /// GetVersion: returns TLV[Tag1] with 7-byte version info.
 fn handle_get_version(_apdu: &ParsedApdu, _store: &mut ObjectStore) -> ApduResponse {
-    let version_data: [u8; 7] = [0x03, 0x01, 0x01, 0x6F, 0xFF, 0x01, 0x0B];
+    let version_data: [u8; 7] = [0x07, 0x02, 0x00, 0x6F, 0xFF, 0x01, 0x0B];
     ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &version_data)])
 }
 

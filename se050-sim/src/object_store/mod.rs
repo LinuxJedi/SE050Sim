@@ -7,10 +7,29 @@ use types::SecureObject;
 /// Hex-encoded 4-byte object ID used as JSON key.
 type ObjectIdKey = String;
 
+/// State for a transient crypto object (digest or cipher context).
+#[derive(Debug, Clone)]
+pub enum CryptoObjectState {
+    Digest {
+        algo: u8,
+        data: Vec<u8>,
+    },
+    Cipher {
+        encrypting: bool,
+        key_id: [u8; 4],
+        iv: Vec<u8>,
+        accumulated: Vec<u8>,
+    },
+}
+
 /// Object store backed by an in-memory HashMap with optional JSON file persistence.
 pub struct ObjectStore {
     objects: HashMap<[u8; 4], SecureObject>,
     persist_path: Option<PathBuf>,
+    /// Transient crypto objects (digest/cipher contexts), keyed by 2-byte crypto object ID.
+    pub crypto_objects: HashMap<u16, CryptoObjectState>,
+    /// Registry of created crypto object types (ID -> (context_type, subtype)).
+    pub crypto_object_types: HashMap<u16, (u8, u8)>,
 }
 
 impl ObjectStore {
@@ -18,6 +37,8 @@ impl ObjectStore {
         Self {
             objects: HashMap::new(),
             persist_path: None,
+            crypto_objects: HashMap::new(),
+            crypto_object_types: HashMap::new(),
         }
     }
 
@@ -25,6 +46,8 @@ impl ObjectStore {
         let mut store = Self {
             objects: HashMap::new(),
             persist_path: Some(path.clone()),
+            crypto_objects: HashMap::new(),
+            crypto_object_types: HashMap::new(),
         };
         store.load();
         store

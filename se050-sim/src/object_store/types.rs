@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Types of EC curves supported by the simulator.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ECCurve {
+    NistP224,
     NistP256,
+    NistP384,
     Ed25519,
 }
 
@@ -11,7 +13,9 @@ impl ECCurve {
     /// Parse from the SE050 curve constant byte.
     pub fn from_se050_byte(b: u8) -> Option<Self> {
         match b {
+            0x02 => Some(ECCurve::NistP224),
             0x03 => Some(ECCurve::NistP256),
+            0x04 => Some(ECCurve::NistP384),
             0x40 => Some(ECCurve::Ed25519),
             _ => None,
         }

@@ -185,24 +185,42 @@ impl T1Responder {
     }
 
     fn handle_s_request(&mut self, code: u8) -> Vec<Vec<u8>> {
-        if code == T1_S_INTERFACE_SOFT_RESET {
-            // Reset sequence numbers
-            self.iseq_rcv = 0;
-            self.iseq_snd = 0;
-            self.apdu_reassembly.clear();
+        match code {
+            T1_S_INTERFACE_SOFT_RESET => {
+                // Reset sequence numbers and respond with ATR
+                self.iseq_rcv = 0;
+                self.iseq_snd = 0;
+                self.apdu_reassembly.clear();
 
-            // Respond with S-frame response containing ATR
-            let ft = FrameType::SFrame {
-                code: T1_S_INTERFACE_SOFT_RESET,
-                is_response: true,
-            };
-            let (header, payload_crc) = build_frame(self.nad_se2hd, ft, &ATR_DATA);
-            vec![header, payload_crc]
-        } else {
-            // Other S-frames: respond with matching S-response, empty payload
-            let ft = FrameType::SFrame { code, is_response: true };
-            let (header, payload_crc) = build_frame(self.nad_se2hd, ft, &[]);
-            vec![header, payload_crc]
+                let ft = FrameType::SFrame {
+                    code: T1_S_INTERFACE_SOFT_RESET,
+                    is_response: true,
+                };
+                let (header, payload_crc) = build_frame(self.nad_se2hd, ft, &ATR_DATA);
+                vec![header, payload_crc]
+            }
+            0x00 => {
+                // Resync: reset sequence numbers, respond with empty S-response
+                self.iseq_rcv = 0;
+                self.iseq_snd = 0;
+                self.apdu_reassembly.clear();
+
+                let ft = FrameType::SFrame { code: 0x00, is_response: true };
+                let (header, payload_crc) = build_frame(self.nad_se2hd, ft, &[]);
+                vec![header, payload_crc]
+            }
+            0x07 => {
+                // GetATR: respond with ATR data (same as InterfaceSoftReset but no state reset)
+                let ft = FrameType::SFrame { code: 0x07, is_response: true };
+                let (header, payload_crc) = build_frame(self.nad_se2hd, ft, &ATR_DATA);
+                vec![header, payload_crc]
+            }
+            _ => {
+                // Other S-frames: respond with matching S-response, empty payload
+                let ft = FrameType::SFrame { code, is_response: true };
+                let (header, payload_crc) = build_frame(self.nad_se2hd, ft, &[]);
+                vec![header, payload_crc]
+            }
         }
     }
 

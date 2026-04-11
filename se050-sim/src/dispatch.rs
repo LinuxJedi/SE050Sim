@@ -24,39 +24,76 @@ pub fn dispatch(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
             P1_EC => handlers::ec::handle_write_ec_key(apdu, store),
             P1_RSA => handlers::rsa::handle_write_rsa_key(apdu, store),
             P1_AES => handlers::aes::handle_write_aes_key(apdu, store),
+            P1_CRYPTO_OBJ => handlers::crypto_obj::handle_create(apdu, store),
+            P1_CURVE => {
+                // CreateECCurve / SetECCurveParam: our crypto libs have curves built-in
+                ApduResponse::success()
+            }
             P1_BINARY | P1_USERID | P1_COUNTER => {
                 handlers::object_mgmt::handle_write(apdu, store)
             }
             _ => ApduResponse::error(SW_WRONG_P1P2),
         },
 
-        INS_READ => handlers::object_mgmt::handle_read(apdu, store),
+        INS_READ => match cred_type {
+            P1_CRYPTO_OBJ => handlers::crypto_obj::handle_list(apdu, store),
+            P1_CURVE => {
+                // ReadECCurveList: return empty list (curves are implicit)
+                ApduResponse::success_with_tlvs(&[crate::tlv::Tlv::new(crate::tlv::TAG_1, &[])])
+            }
+            _ => handlers::object_mgmt::handle_read(apdu, store),
+        },
 
         INS_CRYPTO => match (cred_type, apdu.p2) {
+            // Signature operations (EC + RSA share the same P1)
             (P1_SIGNATURE, P2_SIGN) => handlers::ec::handle_sign(apdu, store),
             (P1_SIGNATURE, P2_VERIFY) => handlers::ec::handle_verify(apdu, store),
+
+            // AES cipher oneshot
             (P1_CIPHER, P2_ENCRYPT_ONESHOT) => {
                 handlers::aes::handle_encrypt_oneshot(apdu, store)
             }
             (P1_CIPHER, P2_DECRYPT_ONESHOT) => {
                 handlers::aes::handle_decrypt_oneshot(apdu, store)
             }
+
+            // AES cipher multi-step
+            (P1_CIPHER, P2_ENCRYPT_INIT) | (P1_CIPHER, P2_DECRYPT_INIT) => {
+                handlers::aes::handle_cipher_init(apdu, store)
+            }
+            (P1_CIPHER, P2_UPDATE) => handlers::aes::handle_cipher_update(apdu, store),
+            (P1_CIPHER, P2_FINAL) => handlers::aes::handle_cipher_final(apdu, store),
+
+            // RSA encrypt/decrypt
             (P1_RSA, P2_ENCRYPT_ONESHOT) => {
                 handlers::rsa::handle_rsa_encrypt(apdu, store)
             }
             (P1_RSA, P2_DECRYPT_ONESHOT) => {
                 handlers::rsa::handle_rsa_decrypt(apdu, store)
             }
+
+            // Digest oneshot
             (P1_DEFAULT, P2_ONESHOT) => handlers::digest::handle_digest_oneshot(apdu, store),
+
+            // Digest multi-step
+            (P1_DEFAULT, P2_INIT) => handlers::digest::handle_digest_init(apdu, store),
+            (P1_DEFAULT, P2_UPDATE) => handlers::digest::handle_digest_update(apdu, store),
+            (P1_DEFAULT, P2_FINAL) => handlers::digest::handle_digest_final(apdu, store),
+
             _ => ApduResponse::error(SW_WRONG_P1P2),
         },
 
         INS_MGMT => {
-            match apdu.p2 {
-                P2_VERSION | P2_MEMORY | P2_RANDOM | P2_DELETE_ALL => {
+            match (cred_type, apdu.p2) {
+                // Crypto object management
+                (P1_CRYPTO_OBJ, P2_DELETE_OBJECT) => {
+                    handlers::crypto_obj::handle_delete(apdu, store)
+                }
+                // General management
+                (_, P2_VERSION) | (_, P2_MEMORY) | (_, P2_RANDOM) | (_, P2_DELETE_ALL) => {
                     handlers::management::handle(apdu, store)
                 }
-                P2_EXIST | P2_DELETE_OBJECT => {
+                (_, P2_EXIST) | (_, P2_DELETE_OBJECT) => {
                     handlers::object_mgmt::handle_mgmt(apdu, store)
                 }
                 _ => ApduResponse::error(SW_WRONG_P1P2),

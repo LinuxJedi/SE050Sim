@@ -3,8 +3,7 @@ use crate::object_store::types::{ECCurve, SecureObject};
 use crate::object_store::ObjectStore;
 use crate::tlv::{self, Tlv, TAG_1, TAG_2, TAG_3, TAG_5};
 
-use p256::ecdsa::signature::Signer;
-use p256::ecdsa::signature::Verifier;
+use ecdsa::signature::{Signer, Verifier};
 use rand::rngs::OsRng;
 
 /// Handle WRITE EC key command (key generation when P2=Default and no private key data).
@@ -39,7 +38,9 @@ pub fn handle_write_ec_key(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRe
     if apdu.key_type() == P1_KEY_PAIR && !has_private_key {
         // Generate a new key pair
         match curve {
+            ECCurve::NistP224 => generate_p224_keypair(obj_id, store),
             ECCurve::NistP256 => generate_p256_keypair(obj_id, store),
+            ECCurve::NistP384 => generate_p384_keypair(obj_id, store),
             ECCurve::Ed25519 => generate_ed25519_keypair(obj_id, store),
         }
     } else if has_private_key {
@@ -51,25 +52,36 @@ pub fn handle_write_ec_key(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRe
     }
 }
 
+fn generate_p224_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduResponse {
+    let sk = p224::ecdsa::SigningKey::random(&mut OsRng);
+    let pk = sk.verifying_key();
+    store.insert(obj_id, SecureObject::ECKeyPair {
+        curve: ECCurve::NistP224,
+        private_key: sk.to_bytes().to_vec(),
+        public_key: pk.to_encoded_point(false).as_bytes().to_vec(),
+    });
+    ApduResponse::success()
+}
+
 fn generate_p256_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduResponse {
-    let signing_key = p256::ecdsa::SigningKey::random(&mut OsRng);
-    let verifying_key = signing_key.verifying_key();
+    let sk = p256::ecdsa::SigningKey::random(&mut OsRng);
+    let pk = sk.verifying_key();
+    store.insert(obj_id, SecureObject::ECKeyPair {
+        curve: ECCurve::NistP256,
+        private_key: sk.to_bytes().to_vec(),
+        public_key: pk.to_encoded_point(false).as_bytes().to_vec(),
+    });
+    ApduResponse::success()
+}
 
-    let private_bytes = signing_key.to_bytes().to_vec();
-    let public_bytes = verifying_key
-        .to_encoded_point(false)
-        .as_bytes()
-        .to_vec();
-
-    store.insert(
-        obj_id,
-        SecureObject::ECKeyPair {
-            curve: ECCurve::NistP256,
-            private_key: private_bytes,
-            public_key: public_bytes,
-        },
-    );
-
+fn generate_p384_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduResponse {
+    let sk = p384::ecdsa::SigningKey::random(&mut OsRng);
+    let pk = sk.verifying_key();
+    store.insert(obj_id, SecureObject::ECKeyPair {
+        curve: ECCurve::NistP384,
+        private_key: sk.to_bytes().to_vec(),
+        public_key: pk.to_encoded_point(false).as_bytes().to_vec(),
+    });
     ApduResponse::success()
 }
 
@@ -93,33 +105,61 @@ fn import_ec_key(
     obj_id: [u8; 4],
     curve: ECCurve,
     private_key_data: &[u8],
-    key_type: u8,
+    _key_type: u8,
     store: &mut ObjectStore,
 ) -> ApduResponse {
-    match (curve.clone(), key_type) {
-        (ECCurve::NistP256, P1_KEY_PAIR | P1_PRIVATE_KEY) => {
-            let Ok(signing_key) = p256::ecdsa::SigningKey::from_bytes(
-                p256::FieldBytes::from_slice(private_key_data),
-            ) else {
-                return ApduResponse::error(SW_WRONG_DATA);
-            };
-            let public_bytes = signing_key
-                .verifying_key()
-                .to_encoded_point(false)
-                .as_bytes()
-                .to_vec();
-            store.insert(
-                obj_id,
-                SecureObject::ECKeyPair {
-                    curve,
-                    private_key: private_key_data.to_vec(),
-                    public_key: public_bytes,
-                },
-            );
-            ApduResponse::success()
-        }
-        _ => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
-    }
+    // For import, just store the raw key data. We'll reconstruct
+    // the signing key when needed for sign/verify operations.
+    store.insert(
+        obj_id,
+        SecureObject::ECKeyPair {
+            curve,
+            private_key: private_key_data.to_vec(),
+            public_key: vec![], // derived on demand
+        },
+    );
+    ApduResponse::success()
+}
+
+fn p224_sign(private_key: &[u8], data: &[u8]) -> ApduResponse {
+    let Ok(sk) = p224::ecdsa::SigningKey::from_bytes(private_key.into()) else {
+        return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+    };
+    let sig: p224::ecdsa::DerSignature = sk.sign(data);
+    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, sig.as_bytes())])
+}
+fn p256_sign(private_key: &[u8], data: &[u8]) -> ApduResponse {
+    let Ok(sk) = p256::ecdsa::SigningKey::from_bytes(private_key.into()) else {
+        return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+    };
+    let sig: p256::ecdsa::DerSignature = sk.sign(data);
+    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, sig.as_bytes())])
+}
+fn p384_sign(private_key: &[u8], data: &[u8]) -> ApduResponse {
+    let Ok(sk) = p384::ecdsa::SigningKey::from_bytes(private_key.into()) else {
+        return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+    };
+    let sig: p384::ecdsa::DerSignature = sk.sign(data);
+    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, sig.as_bytes())])
+}
+
+fn p224_verify(private_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
+    let Ok(sk) = p224::ecdsa::SigningKey::from_bytes(private_key.into()) else { return false };
+    let vk = sk.verifying_key();
+    let Ok(sig) = p224::ecdsa::DerSignature::try_from(sig_data) else { return false };
+    vk.verify(data, &sig).is_ok()
+}
+fn p256_verify(private_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
+    let Ok(sk) = p256::ecdsa::SigningKey::from_bytes(private_key.into()) else { return false };
+    let vk = sk.verifying_key();
+    let Ok(sig) = p256::ecdsa::DerSignature::try_from(sig_data) else { return false };
+    vk.verify(data, &sig).is_ok()
+}
+fn p384_verify(private_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
+    let Ok(sk) = p384::ecdsa::SigningKey::from_bytes(private_key.into()) else { return false };
+    let vk = sk.verifying_key();
+    let Ok(sig) = p384::ecdsa::DerSignature::try_from(sig_data) else { return false };
+    vk.verify(data, &sig).is_ok()
 }
 
 /// Handle signature generation (EC + RSA).
@@ -156,18 +196,14 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
     };
 
     match &key_obj {
-        SecureObject::ECKeyPair {
-            curve: ECCurve::NistP256,
-            private_key,
-            ..
-        } => {
-            let Ok(signing_key) = p256::ecdsa::SigningKey::from_bytes(
-                p256::FieldBytes::from_slice(private_key),
-            ) else {
-                return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
-            };
-            let signature: p256::ecdsa::DerSignature = signing_key.sign(input_data);
-            ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, signature.as_bytes())])
+        SecureObject::ECKeyPair { curve: ECCurve::NistP224, private_key, .. } => {
+            p224_sign(private_key, input_data)
+        }
+        SecureObject::ECKeyPair { curve: ECCurve::NistP256, private_key, .. } => {
+            p256_sign(private_key, input_data)
+        }
+        SecureObject::ECKeyPair { curve: ECCurve::NistP384, private_key, .. } => {
+            p384_sign(private_key, input_data)
         }
         SecureObject::ECKeyPair {
             curve: ECCurve::Ed25519,
@@ -237,23 +273,18 @@ pub fn handle_verify(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse
     };
 
     let result = match &key_obj {
-        SecureObject::ECKeyPair {
-            curve: ECCurve::NistP256,
-            private_key,
-            ..
-        } => {
-            let Ok(signing_key) = p256::ecdsa::SigningKey::from_bytes(
-                p256::FieldBytes::from_slice(private_key),
-            ) else {
-                return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+        SecureObject::ECKeyPair { curve: ECCurve::NistP224, private_key, .. } => {
+            return if p224_verify(private_key, &input_data, &sig_data) {
+                ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[0x01])])
+            } else {
+                ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[0x02])])
             };
-            let verifying_key = signing_key.verifying_key();
-            let Ok(signature) =
-                p256::ecdsa::DerSignature::try_from(sig_data.as_slice())
-            else {
-                return ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[0x02])]);
-            };
-            verifying_key.verify(&input_data, &signature).is_ok()
+        }
+        SecureObject::ECKeyPair { curve: ECCurve::NistP256, private_key, .. } => {
+            p256_verify(private_key, &input_data, &sig_data)
+        }
+        SecureObject::ECKeyPair { curve: ECCurve::NistP384, private_key, .. } => {
+            p384_verify(private_key, &input_data, &sig_data)
         }
         SecureObject::ECKeyPair {
             curve: ECCurve::Ed25519,

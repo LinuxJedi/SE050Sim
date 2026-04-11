@@ -7,8 +7,8 @@ const SE050_AID: [u8; 16] = [
     0x00, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Simulated version info: major=3, minor=1, patch=1, features=0x6FFF, securebox=0x010B
-const APP_VERSION: [u8; 7] = [0x03, 0x01, 0x01, 0x6F, 0xFF, 0x01, 0x0B];
+/// Simulated version info: major=7, minor=2, patch=0, features=0x6FFF, securebox=0x010B
+const APP_VERSION: [u8; 7] = [0x07, 0x02, 0x00, 0x6F, 0xFF, 0x01, 0x0B];
 
 /// Handle SELECT applet command (CLA=0x00, INS=0xA4).
 /// The response is raw bytes (not TLV-wrapped), matching what the driver
