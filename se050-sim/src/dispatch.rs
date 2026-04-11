@@ -53,8 +53,16 @@ pub fn dispatch(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
                 }
             }
             (P1_CURVE, _) => {
-                // ReadECCurveList and other curve operations: return success
-                ApduResponse::success_with_tlvs(&[crate::tlv::Tlv::new(crate::tlv::TAG_1, &[])])
+                // ReadECCurveList: return 17-byte list marking all NIST curves as SET.
+                // Index = curve_id - 1, value 0x01 = SET, 0x00 = NOT_SET.
+                let mut curve_list = [0u8; 0x11]; // kSE05x_ECCurve_Total_Weierstrass_Curves
+                curve_list[0x00] = 0x01; // NIST_P192
+                curve_list[0x01] = 0x01; // NIST_P224
+                curve_list[0x02] = 0x01; // NIST_P256
+                curve_list[0x03] = 0x01; // NIST_P384
+                curve_list[0x04] = 0x01; // NIST_P521
+                ApduResponse::success_with_tlvs(
+                    &[crate::tlv::Tlv::new(crate::tlv::TAG_1, &curve_list)])
             }
             _ => handlers::object_mgmt::handle_read(apdu, store),
         },

@@ -68,7 +68,12 @@ impl SecureObject {
                 ECCurve::NistP384 => 0x2D, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P384
                 ECCurve::Ed25519 => 0x01,  // generic EC_KEY_PAIR for Ed25519
             },
-            SecureObject::ECPublicKey { .. } => 0x03,
+            SecureObject::ECPublicKey { curve, .. } => match curve {
+                ECCurve::NistP224 => 0x26, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P224
+                ECCurve::NistP256 => 0x2A, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P256
+                ECCurve::NistP384 => 0x2E, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P384
+                ECCurve::Ed25519 => 0x03,
+            },
             SecureObject::RSAKeyPair { .. } => 0x04,
             SecureObject::AESKey { .. } => 0x09,
             SecureObject::Binary { .. } => 0x0B,
@@ -80,15 +85,17 @@ impl SecureObject {
 
     /// Get the SE050 EC curve ID for EC key objects.
     pub fn curve_id(&self) -> Option<u8> {
-        match self {
-            SecureObject::ECKeyPair { curve, .. } => Some(match curve {
-                ECCurve::NistP224 => 0x02,
-                ECCurve::NistP256 => 0x03,
-                ECCurve::NistP384 => 0x04,
-                ECCurve::Ed25519 => 0x40,
-            }),
+        let curve = match self {
+            SecureObject::ECKeyPair { curve, .. } => Some(curve),
+            SecureObject::ECPublicKey { curve, .. } => Some(curve),
             _ => None,
-        }
+        }?;
+        Some(match curve {
+            ECCurve::NistP224 => 0x02,
+            ECCurve::NistP256 => 0x03,
+            ECCurve::NistP384 => 0x04,
+            ECCurve::Ed25519 => 0x40,
+        })
     }
 
     /// Get the size of the object's primary data in bytes.
