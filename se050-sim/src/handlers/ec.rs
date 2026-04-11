@@ -61,6 +61,7 @@ pub fn handle_write_ec_key(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRe
             ECCurve::NistP256 => generate_p256_keypair(obj_id, store),
             ECCurve::NistP384 => generate_p384_keypair(obj_id, store),
             ECCurve::Ed25519 => generate_ed25519_keypair(obj_id, store),
+            ECCurve::Curve25519 => generate_x25519_keypair(obj_id, store),
         }
     } else if let Some(priv_key) = private_key_data {
         // Import private key (with optional public key)
@@ -124,6 +125,24 @@ fn generate_ed25519_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduRes
             curve: ECCurve::Ed25519,
             private_key: signing_key.to_bytes().to_vec(),
             public_key: verifying_key.to_bytes().to_vec(),
+        },
+    );
+
+    ApduResponse::success()
+}
+
+fn generate_x25519_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduResponse {
+    let secret = x25519_dalek::StaticSecret::random_from_rng(OsRng);
+    let public = x25519_dalek::PublicKey::from(&secret);
+
+    // Store in native little-endian format (X25519 convention).
+    // The SE050 stores Montgomery curve keys in LE internally.
+    store.insert(
+        obj_id,
+        SecureObject::ECKeyPair {
+            curve: ECCurve::Curve25519,
+            private_key: secret.to_bytes().to_vec(),
+            public_key: public.to_bytes().to_vec(),
         },
     );
 
@@ -411,18 +430,15 @@ pub fn handle_ecdh(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
         SecureObject::ECKeyPair { curve: ECCurve::NistP384, private_key, .. } => {
             p384_ecdh(private_key, peer_pubkey)
         }
+        SecureObject::ECKeyPair { curve: ECCurve::Curve25519, private_key, .. } => {
+            x25519_ecdh(private_key, peer_pubkey)
+        }
         _ => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
     };
 
     match shared_secret {
         Some(secret) => {
-            // Optionally reverse endianness if P2 indicates DH_REVERSE
-            let secret = if apdu.p2 == 0x2F {
-                secret.into_iter().rev().collect()
-            } else {
-                secret
-            };
-            store.insert(output_id, SecureObject::Binary { data: secret });
+            store.insert(output_id, SecureObject::Binary { data: secret.clone() });
             ApduResponse::success()
         }
         None => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
@@ -468,6 +484,24 @@ fn p384_ecdh(private_key: &[u8], peer_pubkey: &[u8]) -> Option<Vec<u8>> {
     let peer_pk = p384::PublicKey::from_sec1_bytes(peer_pubkey).ok()?;
     let shared = p384::ecdh::diffie_hellman(sk.to_nonzero_scalar(), peer_pk.as_affine());
     Some(shared.raw_secret_bytes().to_vec())
+}
+
+fn x25519_ecdh(private_key: &[u8], peer_pubkey: &[u8]) -> Option<Vec<u8>> {
+    if private_key.len() != 32 || peer_pubkey.len() != 32 {
+        return None;
+    }
+    // Private key is stored in native LE format
+    let mut sk_bytes = [0u8; 32];
+    sk_bytes.copy_from_slice(private_key);
+    // Peer public key from APDU Tag2: the SDK sends it reversed (BE)
+    // for Montgomery curves, so reverse back to LE for X25519
+    let mut pk_bytes = [0u8; 32];
+    pk_bytes.copy_from_slice(peer_pubkey);
+    pk_bytes.reverse();
+    let sk = x25519_dalek::StaticSecret::from(sk_bytes);
+    let pk = x25519_dalek::PublicKey::from(pk_bytes);
+    let shared = sk.diffie_hellman(&pk);
+    Some(shared.to_bytes().to_vec())
 }
 
 #[cfg(test)]

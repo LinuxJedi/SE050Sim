@@ -7,6 +7,7 @@ pub enum ECCurve {
     NistP256,
     NistP384,
     Ed25519,
+    Curve25519,
 }
 
 impl ECCurve {
@@ -17,6 +18,7 @@ impl ECCurve {
             0x03 => Some(ECCurve::NistP256),
             0x04 => Some(ECCurve::NistP384),
             0x40 => Some(ECCurve::Ed25519),
+            0x41 => Some(ECCurve::Curve25519),
             _ => None,
         }
     }
@@ -66,13 +68,15 @@ impl SecureObject {
                 ECCurve::NistP224 => 0x25, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P224
                 ECCurve::NistP256 => 0x29, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P256
                 ECCurve::NistP384 => 0x2D, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P384
-                ECCurve::Ed25519 => 0x01,  // generic EC_KEY_PAIR for Ed25519
+                ECCurve::Ed25519 => 0x01,
+                ECCurve::Curve25519 => 0x69, // kSE05x_SecObjTyp_EC_KEY_PAIR_MONT_DH_25519
             },
             SecureObject::ECPublicKey { curve, .. } => match curve {
                 ECCurve::NistP224 => 0x26, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P224
                 ECCurve::NistP256 => 0x2A, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P256
                 ECCurve::NistP384 => 0x2E, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P384
                 ECCurve::Ed25519 => 0x03,
+                ECCurve::Curve25519 => 0x6B, // kSE05x_SecObjTyp_EC_PUB_KEY_MONT_DH_25519
             },
             SecureObject::RSAKeyPair { .. } => 0x04,
             SecureObject::AESKey { .. } => 0x09,
@@ -95,6 +99,7 @@ impl SecureObject {
             ECCurve::NistP256 => 0x03,
             ECCurve::NistP384 => 0x04,
             ECCurve::Ed25519 => 0x40,
+            ECCurve::Curve25519 => 0x41,
         })
     }
 

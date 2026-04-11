@@ -15,6 +15,7 @@ p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p384 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 ecdsa = { version = "0.16", features = ["signing", "verifying", "der"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 rsa = { version = "0.9", features = ["sha2"] }
