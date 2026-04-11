@@ -79,7 +79,7 @@ RUN ./configure \
       --enable-keygen \
       --enable-cryptocb \
       --enable-ecc \
-      --enable-ed25519 \
+      --disable-ed25519 \
       --disable-curve25519 \
       --enable-sha224 \
       --enable-sha384 \
