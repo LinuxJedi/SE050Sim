@@ -119,18 +119,14 @@ fn generate_ed25519_keypair(obj_id: [u8; 4], store: &mut ObjectStore) -> ApduRes
     let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
-    // SE050 stores Ed25519 keys reversed (BE). SDK reverses on read.
-    let mut priv_bytes = signing_key.to_bytes();
-    priv_bytes.reverse();
-    let mut pub_bytes = verifying_key.to_bytes();
-    pub_bytes.reverse();
-
+    // Ed25519 keys are NOT reversed by the SDK on write (unlike Curve25519).
+    // Store in native LE format.
     store.insert(
         obj_id,
         SecureObject::ECKeyPair {
             curve: ECCurve::Ed25519,
-            private_key: priv_bytes.to_vec(),
-            public_key: pub_bytes.to_vec(),
+            private_key: signing_key.to_bytes().to_vec(),
+            public_key: verifying_key.to_bytes().to_vec(),
         },
     );
 
@@ -283,14 +279,18 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
             if private_key.len() != 32 {
                 return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
             }
-            // Stored reversed (BE) — reverse to LE for signing
+            // Ed25519: SDK does NOT reverse on write, so stored in native LE
             let mut key_bytes = [0u8; 32];
             key_bytes.copy_from_slice(private_key);
-            key_bytes.reverse();
             let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
             use ed25519_dalek::Signer;
-            let signature = signing_key.sign(&input_data);
-            ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &signature.to_bytes())])
+            let sig = signing_key.sign(&input_data);
+            // SDK reverses each 32-byte half (R, S) of Ed25519 signatures
+            // after reading from SE050. Store reversed so SDK produces correct output.
+            let mut sig_bytes = sig.to_bytes();
+            sig_bytes[..32].reverse();
+            sig_bytes[32..].reverse();
+            ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &sig_bytes)])
         }
         SecureObject::RSAKeyPair { .. } => {
             super::rsa::handle_rsa_sign(&key_obj, algo, &input_data)
@@ -371,15 +371,17 @@ pub fn handle_verify(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse
             if public_key.len() != 32 || sig_data.len() != 64 {
                 return ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[0x02])]);
             }
-            // Stored reversed (BE) — reverse to LE for verification
+            // Ed25519: stored in native LE
             let mut pk_bytes = [0u8; 32];
             pk_bytes.copy_from_slice(public_key);
-            pk_bytes.reverse();
             let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes) else {
                 return ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[0x02])]);
             };
+            // SDK reverses each 32-byte half before sending to SE050
             let mut sig_bytes = [0u8; 64];
             sig_bytes.copy_from_slice(&sig_data);
+            sig_bytes[..32].reverse();
+            sig_bytes[32..].reverse();
             let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
             use ed25519_dalek::Verifier;
             verifying_key.verify(&input_data, &signature).is_ok()
@@ -555,5 +557,24 @@ mod tests {
 
         let tlvs = crate::tlv::parse_tlvs(&resp.data).unwrap();
         assert!(p384_verify(&private_key, &hash, &tlvs[0].value));
+    }
+}
+
+#[cfg(test)]
+mod test_ed25519_vector {
+    #[test]
+    fn test_ed25519_rfc8032_vector1() {
+        // RFC 8032 test vector 1: sign empty message
+        let skey1 = hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").unwrap();
+        let expected_sig = hex::decode("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b").unwrap();
+
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(&skey1);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+        use ed25519_dalek::Signer;
+        let sig = signing_key.sign(b"");
+        
+        assert_eq!(sig.to_bytes().to_vec(), expected_sig,
+            "Ed25519 signature mismatch for empty message");
     }
 }
