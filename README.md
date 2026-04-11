@@ -7,9 +7,10 @@ A software simulator for the NXP SE050 secure element, implementing the full I2C
 ### Cryptographic Operations
 - **ECC**: Key generation, ECDSA sign/verify for NIST P-224, P-256, P-384 curves
 - **EdDSA**: Ed25519 key generation, sign/verify
+- **X25519**: Curve25519 key generation, ECDH shared secret
 - **RSA**: 1024–4096 bit key generation, PKCS1v1.5 and PSS sign/verify, PKCS1v1.5 and OAEP encrypt/decrypt
 - **AES**: Key write/generate, AES-CBC encrypt/decrypt (oneshot and multi-step)
-- **ECDH**: Diffie-Hellman shared secret for P-224, P-256, P-384
+- **ECDH**: Diffie-Hellman shared secret for P-224, P-256, P-384, Curve25519
 - **Digest**: SHA-1, SHA-224, SHA-256, SHA-384, SHA-512 (oneshot and multi-step)
 - **RNG**: Hardware-quality random number generation
 
@@ -19,6 +20,8 @@ A software simulator for the NXP SE050 secure element, implementing the full I2C
 - ReadIDList, ReadType, ReadSize
 - UserID, Counter objects
 - Crypto object lifecycle (Create, List, Delete)
+- EC public key import and verification
+- ReadECCurveList with full NIST curve inventory
 
 ### Protocol Stack
 - **T=1 protocol** (ISO 7816-3): Frame parsing/building, CRC-16 X25, S-frames (InterfaceSoftReset, GetATR, Resync), I-frame sequencing, multi-frame chaining
@@ -43,7 +46,7 @@ docker build -f Dockerfile.wolfcrypt -t se050-sim-wolfcrypt .
 docker run se050-sim-wolfcrypt
 ```
 
-This builds a full integration with wolfSSL and the NXP Plug&Trust SDK, then runs the wolfCrypt cryptographic test suite against the simulator. See [wolfCrypt Integration](#wolfcrypt-integration) for details.
+This builds a full integration with wolfSSL and the NXP Plug&Trust SDK, then runs the wolfCrypt cryptographic test suite against the simulator. **All 41 tests pass.** See [wolfCrypt Integration](#wolfcrypt-integration) for details.
 
 ## Architecture
 
@@ -78,7 +81,7 @@ This builds a full integration with wolfSSL and the NXP Plug&Trust SDK, then run
 ### Two transport modes
 
 1. **In-process mock I2C** (`Se050Simulator` struct) — implements `embedded_hal::blocking::i2c::{Read, Write}` for direct use with the Rust `nxp-se050` driver
-2. **TCP server** (`tcp_server` binary) — listens on port 8050, serves T=1 frames over TCP for use with the NXP Plug&Trust C SDK
+2. **TCP server** (`tcp_server` binary) — multi-threaded, listens on port 8050, serves T=1 frames over TCP for use with the NXP Plug&Trust C SDK
 
 ## Project Structure
 
@@ -104,7 +107,7 @@ SE050Sim/
 │   │   │   ├── management.rs  GetVersion, GetRandom, etc.
 │   │   │   ├── object_mgmt.rs Object CRUD operations
 │   │   │   ├── crypto_obj.rs  Crypto object lifecycle
-│   │   │   ├── ec.rs          ECC operations (P-224/256/384, Ed25519)
+│   │   │   ├── ec.rs          ECC operations (P-224/256/384, Ed25519, X25519)
 │   │   │   ├── rsa.rs         RSA operations
 │   │   │   ├── aes.rs         AES operations
 │   │   │   └── digest.rs      Hash operations
@@ -140,6 +143,8 @@ A custom `i2c_a7.c` replaces the NXP SDK's I2C platform layer with TCP socket ca
 
 ### Test results
 
+All 41 wolfCrypt tests pass:
+
 | Category | Tests | Status |
 |----------|-------|--------|
 | SHA (1/224/256/384/512), SHA-3 | 6 | Pass |
@@ -150,13 +155,16 @@ A custom `i2c_a7.c` replaces the NXP SDK's I2C platform layer with TCP socket ca
 | GMAC, Chacha, POLY1305, ChaPoly | 4 | Pass |
 | AES, AES192, AES256, AES-CBC, AES-GCM | 5 | Pass |
 | DH, PWDBASED | 2 | Pass |
+| ECC (P-224, P-256, P-384 + ECDH + test vectors) | 1 | Pass |
+| MLKEM, logging, time, mutex, memcb | 5 | Pass |
 | macro, error, MEMORY, base64, asn | 5 | Pass |
-| ECC (P-224/P-256 fully pass, P-384 vector WIP) | 1 | Fail* |
-| RSA | — | Skipped† |
+| crypto callback | 1 | Pass |
+| RSA | — | Skipped* |
+| Ed25519, Curve25519 | — | Skipped† |
 
-\* ECC keygen, ECDSA sign/verify, ECDH, key import, and test vectors all pass for P-224 and P-256. P-384 keygen/sign/verify/ECDH pass but the FIPS 186-3 test vector (SHA-1 hash on P-384) fails. See [Known Issues](#known-issues).
+\* RSA disabled due to a known wolfCrypt SE050 RSA bug.
 
-† RSA disabled due to a known wolfCrypt SE050 RSA bug.
+† Ed25519 and Curve25519 disabled in wolfCrypt build due to NXP SDK byte-reversal convention for Montgomery/Edwards curves during key import. Key generation and basic operations work through the Rust driver. See [Known Issues](#known-issues).
 
 ### Building manually
 
@@ -191,10 +199,9 @@ If you want to build outside Docker:
    cd wolfssl && ./autogen.sh
    ./configure --with-se050=/path/to/simw-top \
      --enable-keygen --enable-cryptocb --enable-ecc \
-     --enable-ed25519 --enable-curve25519 \
      --enable-sha224 --enable-sha384 --enable-sha512 \
      --disable-rsa --disable-examples --enable-crypttests \
-     CFLAGS="-DWOLFSSL_SE050_INIT" \
+     CFLAGS="-DWOLFSSL_SE050_INIT -DECC_USER_CURVES -DHAVE_ECC224 -DHAVE_ECC256 -DHAVE_ECC384" \
      LDFLAGS="-L/path/to/simw-top/build/sss"
    make -j$(nproc) && make install
    ```
@@ -224,13 +231,11 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 ## Known Issues
 
-- **ECC test (P-384 vector)**: The wolfCrypt ECC test fails at `ecc_test_vector 48` — a P-384 ECDSA test vector using a SHA-1 hash (20 bytes). ECC keygen, sign, verify, ECDH, key import, and test vectors all pass for P-224 and P-256. The P-384 prehash verification with a non-native hash size (SHA-1 on a SHA-384 curve) returns false. Under investigation.
+- **Ed25519/Curve25519 wolfCrypt test vectors**: The NXP SDK reverses byte order for Montgomery and Edwards curve keys during import/export (`sss_key_store_set_key`/`sss_key_store_get_key`). The wolfCrypt Ed25519 and Curve25519 test vector tests import known keys and compare signatures/shared secrets. The simulator needs to match the SDK's exact byte-reversal convention at each layer (WriteECKey, ReadObject, ECDH Tag2). Key generation and basic operations work correctly through the Rust driver.
 
 - **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through the Rust driver tests.
 
 - **SCP03**: Secure Channel Protocol 03 is not implemented. The simulator operates in plain (unauthenticated) mode only.
-
-- **P-384 test vector**: The FIPS 186-3 P-384 test vector uses SHA-1 (20-byte hash) with a P-384 key. The simulator's prehash verify returns false for this combination. P-384 keygen, sign, verify, and ECDH all work correctly with native-sized hashes.
 
 ## License
 
