@@ -628,6 +628,10 @@ static void test_ed25519_sign_verify(void)
     sss_se05x_asymmetric_t asym;
     uint32_t obj_id = OBJ_ID_BASE + 70;
 
+    uint8_t pubkey_der[128] = {0};
+    size_t pubkey_der_len = sizeof(pubkey_der);
+    size_t pubkey_bits = 0;
+
     uint8_t msg[] = "test message for Ed25519";
     uint8_t sig[64] = {0};
     size_t sig_len = sizeof(sig);
@@ -642,6 +646,11 @@ static void test_ed25519_sign_verify(void)
 
     status = sss_key_store_generate_key(&g_ks, &key_obj, 256, NULL);
     ASSERT_OK(status, "ed25519 key generate");
+
+    /* Read public key */
+    status = sss_key_store_get_key(&g_ks, &key_obj,
+        pubkey_der, &pubkey_der_len, &pubkey_bits);
+    ASSERT_OK(status, "ed25519 get public key");
 
     /* Sign via SE050 */
     status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
@@ -668,6 +677,39 @@ static void test_ed25519_sign_verify(void)
 
     sss_asymmetric_context_free(&asym);
 
+    /* Verify signature with OpenSSL.
+     * The SDK reverses the 32-byte raw public key (endianness swap for
+     * Montgomery/Edwards curves). We reverse it back before giving it to
+     * OpenSSL. The SDK also double-reverses each signature half (R,S) so
+     * the signature is already in standard Ed25519 format. */
+    {
+        /* Ed25519 SubjectPublicKeyInfo DER header is 12 bytes:
+         * 30 2a 30 05 06 03 2b 65 70 03 21 00 [32 bytes key] */
+        const size_t ed25519_der_hdr_len = 12;
+        if (pubkey_der_len != ed25519_der_hdr_len + 32)
+            TEST_FAILF("unexpected Ed25519 pubkey DER len: %zu", pubkey_der_len);
+
+        /* Reverse the raw 32 bytes back to standard LE */
+        uint8_t raw_pubkey[32];
+        for (int i = 0; i < 32; i++)
+            raw_pubkey[i] = pubkey_der[ed25519_der_hdr_len + 31 - i];
+
+        EVP_PKEY *pkey = EVP_PKEY_new_raw_public_key(
+            EVP_PKEY_ED25519, NULL, raw_pubkey, 32);
+        if (!pkey) TEST_FAIL("OpenSSL: EVP_PKEY_new_raw_public_key failed");
+
+        EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+        if (EVP_DigestVerifyInit(mdctx, NULL, NULL, NULL, pkey) != 1)
+            TEST_FAIL("OpenSSL: DigestVerifyInit failed");
+
+        int rc = EVP_DigestVerify(mdctx, sig, sig_len, msg, sizeof(msg));
+
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(pkey);
+
+        if (rc != 1) TEST_FAIL("OpenSSL Ed25519 verify failed");
+    }
+
     /* Sign a different message and verify it does NOT match original sig */
     uint8_t msg2[] = "different message";
     status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
@@ -682,6 +724,102 @@ static void test_ed25519_sign_verify(void)
             TEST_FAIL("ed25519 verify should fail for wrong message");
         }
     }
+
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: Ed25519 Test Vector (RFC 8032 vector 1)
+ * Import a known key, sign an empty message, compare to expected signature.
+ * This is equivalent to the wolfCrypt Ed25519 test vector test.
+ * ====================================================================== */
+static void test_ed25519_test_vector(void)
+{
+    TEST_BEGIN("Ed25519-test-vector");
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+    uint32_t obj_id = OBJ_ID_BASE + 71;
+
+    /* RFC 8032 test vector 1 */
+    static const uint8_t priv_seed[32] = {
+        0x9d,0x61,0xb1,0x9d,0xef,0xfd,0x5a,0x60,
+        0xba,0x84,0x4a,0xf4,0x92,0xec,0x2c,0xc4,
+        0x44,0x49,0xc5,0x69,0x7b,0x32,0x69,0x19,
+        0x70,0x3b,0xac,0x03,0x1c,0xae,0x7f,0x60
+    };
+    static const uint8_t pub_key[32] = {
+        0xd7,0x5a,0x98,0x01,0x82,0xb1,0x0a,0xb7,
+        0xd5,0x4b,0xfe,0xd3,0xc9,0x64,0x07,0x3a,
+        0x0e,0xe1,0x72,0xf3,0xda,0xa3,0xf4,0xa1,
+        0x84,0x46,0xb0,0xb8,0xd5,0x82,0x40,0xd0
+    };
+    static const uint8_t expected_sig[64] = {
+        0xe5,0x56,0x43,0x00,0xc3,0x60,0xac,0x72,
+        0x90,0x86,0xe2,0xcc,0x80,0x6e,0x82,0x8a,
+        0x84,0x87,0x7f,0x1e,0xb8,0xe5,0xd9,0x74,
+        0xd8,0x73,0xe0,0x65,0x22,0x49,0x01,0x55,
+        0x5f,0xb8,0x82,0x15,0x90,0xa3,0x3b,0xac,
+        0xc6,0x1e,0x39,0x70,0x1c,0xf9,0xb4,0x6b,
+        0xd2,0x5b,0xf5,0xf0,0x59,0x5b,0xbe,0x24,
+        0x65,0x51,0x41,0x43,0x8e,0x7a,0x10,0x0b
+    };
+
+    /* Build RFC 8410 OneAsymmetricKey DER for import:
+     * SEQUENCE {
+     *   INTEGER 0,
+     *   SEQUENCE { OID 1.3.101.112 },
+     *   OCTET STRING { OCTET STRING { private_key } },
+     *   [1] { 0x00 || public_key }
+     * } */
+    uint8_t der[83];
+    static const uint8_t der_hdr[] = {
+        0x30, 0x51,             /* SEQUENCE (81 bytes) */
+        0x02, 0x01, 0x00,       /* INTEGER 0 */
+        0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,  /* SEQUENCE { OID Ed25519 } */
+        0x04, 0x22, 0x04, 0x20  /* OCTET STRING { OCTET STRING (32 bytes) */
+    };
+    static const uint8_t der_pub_hdr[] = {
+        0x81, 0x21, 0x00        /* [1] IMPLICIT PRIMITIVE BIT STRING, 0 unused bits */
+    };
+    memcpy(der, der_hdr, sizeof(der_hdr));
+    memcpy(der + sizeof(der_hdr), priv_seed, 32);
+    memcpy(der + sizeof(der_hdr) + 32, der_pub_hdr, sizeof(der_pub_hdr));
+    memcpy(der + sizeof(der_hdr) + 32 + sizeof(der_pub_hdr), pub_key, 32);
+
+    /* Import the key pair */
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_EC_TWISTED_ED, 32,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "ed25519 vector key allocate");
+
+    status = sss_key_store_set_key(&g_ks, &key_obj, der, sizeof(der),
+        256, NULL, 0);
+    ASSERT_OK(status, "ed25519 vector key import");
+
+    /* Sign empty message via SE050 */
+    uint8_t sig[64] = {0};
+    size_t sig_len = sizeof(sig);
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_SHA512, kMode_SSS_Sign);
+    ASSERT_OK(status, "ed25519 vector sign context_init");
+
+    uint8_t empty = 0;
+    status = sss_se05x_asymmetric_sign(
+        (sss_se05x_asymmetric_t *)&asym,
+        &empty, 0, sig, &sig_len);
+    ASSERT_OK(status, "ed25519 vector sign");
+
+    sss_asymmetric_context_free(&asym);
+
+    /* Compare to expected RFC 8032 signature */
+    ASSERT_EQ(sig_len, 64, "ed25519 vector sig length mismatch");
+    ASSERT_MEM_EQ(sig, expected_sig, 64, "ed25519 vector signature mismatch");
 
     sss_key_store_erase_key(&g_ks, &key_obj);
     sss_key_object_free(&key_obj);
@@ -807,17 +945,16 @@ int main(void)
     test_aes_cbc("AES-128-CBC", OBJ_ID_BASE + 30, 16, EVP_aes_128_cbc());
     test_aes_cbc("AES-256-CBC", OBJ_ID_BASE + 31, 32, EVP_aes_256_cbc());
 
-    /* RSA: The NXP SDK's RSA sign path uses EMSA encoding + RSADecrypt
-     * NO_PAD, which sends 256-byte multi-frame APDUs. This causes timeouts
-     * in the current TCP transport. RSA is validated through the Rust
-     * driver tests (14/14 pass including RSA sign/verify/encrypt/decrypt).
-     * TODO: Fix multi-frame APDU handling for large RSA payloads. */
+    /* RSA */
+    test_rsa_sign_verify("RSA-2048-sign-verify", OBJ_ID_BASE + 50, 2048);
+    test_rsa_encrypt_decrypt();
 
     /* X25519 */
     test_x25519_ecdh();
 
     /* Ed25519 */
     test_ed25519_sign_verify();
+    test_ed25519_test_vector();
 
     /* Object management */
     test_object_write_read();

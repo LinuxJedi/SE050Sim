@@ -72,7 +72,7 @@ fn encode_pcb(ft: FrameType) -> u8 {
             (seq << 6) | if multi { 0x20 } else { 0 }
         }
         FrameType::RFrame { seq, err } => {
-            T1_R_CODE | (seq << 5) | err
+            T1_R_CODE | (seq << 4) | err
         }
         FrameType::SFrame { code, is_response } => {
             (if is_response { T1_S_RESPONSE } else { T1_S_REQUEST }) | code

@@ -39,6 +39,15 @@ docker run se050-sim
 
 This builds the simulator and runs 23 tests (9 unit + 14 integration) against the [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver.
 
+### Run the SDK test suite (OpenSSL cross-verification)
+
+```bash
+docker build -f Dockerfile.sdk-test -t se050-sim-sdk-test .
+docker run se050-sim-sdk-test
+```
+
+This tests the simulator through the NXP Plug&Trust SDK's SSS API, with independent verification using OpenSSL. **All 18 tests pass.** See [SDK Test Suite](#sdk-test-suite) for details.
+
 ### Run the wolfCrypt test suite
 
 ```bash
@@ -53,7 +62,8 @@ This builds a full integration with wolfSSL and the NXP Plug&Trust SDK, then run
 ```
 ┌─────────────────────────────────────┐
 │  Application / Test Suite           │
-│  (Rust driver or C SDK + wolfSSL)   │
+│  (Rust driver, SDK+OpenSSL, or     │
+│   C SDK + wolfSSL)                  │
 └────────────┬────────────────────────┘
              │  I2C or TCP
 ┌────────────▼────────────────────────┐
@@ -88,6 +98,7 @@ This builds a full integration with wolfSSL and the NXP Plug&Trust SDK, then run
 ```
 SE050Sim/
 ├── Dockerfile                 Rust driver integration tests
+├── Dockerfile.sdk-test        SDK test suite (OpenSSL verification)
 ├── Dockerfile.wolfcrypt       wolfCrypt test suite integration
 ├── patches/
 │   └── apply.sh               Driver bug patches for nxp-se050
@@ -116,6 +127,10 @@ SE050Sim/
 │   │       └── types.rs        SecureObject enum
 │   └── tests/
 │       └── integration.rs     Tests using the nxp-se050 driver
+├── sdk-test/
+│   ├── test_se050.c            SDK test suite (SSS API + OpenSSL)
+│   ├── test_helpers.h          Test macros (ASSERT_OK, ASSERT_EQ, etc.)
+│   └── run_test.sh             Test runner script
 └── wolfcrypt-test/
     ├── i2c_a7.c               Custom PAL: TCP socket transport
     ├── se05x_reset.c           No-op reset stub for Docker
@@ -124,6 +139,31 @@ SE050Sim/
     ├── patch_ftr.py            Enable EC curve features in SDK
     └── run_test.sh             Test runner script
 ```
+
+## SDK Test Suite
+
+The simulator has an independent test suite that uses the NXP Plug&Trust SDK's SSS API with OpenSSL for cross-verification. Each test performs a cryptographic operation via the SE050 simulator and then independently verifies the result using OpenSSL.
+
+### Test results
+
+All 18 tests pass:
+
+| Test | Description |
+|------|-------------|
+| RNG | Get random bytes, verify non-zero and unique |
+| SHA-1/224/256/384/512 | Hash via SE050, compare with OpenSSL `EVP_Digest` |
+| ECC-P256-keygen-sign-verify | ECDSA sign via SE050, verify with OpenSSL |
+| ECC-P384-keygen-sign-verify | ECDSA sign via SE050, verify with OpenSSL |
+| ECDH-P256 | Two SE050 key pairs, verify shared secrets match |
+| AES-128-CBC | Encrypt via SE050, decrypt with OpenSSL, compare |
+| AES-256-CBC | Encrypt via SE050, decrypt with OpenSSL, compare |
+| RSA-2048-sign-verify | RSA PKCS1v1.5 sign via SE050, verify with OpenSSL |
+| RSA-2048-encrypt-decrypt | OpenSSL encrypts, SE050 decrypts, compare plaintext |
+| X25519-ECDH | Two SE050 key pairs, verify shared secrets match |
+| Ed25519-sign-verify | Sign via SE050, verify with both SE050 and OpenSSL |
+| Ed25519-test-vector | Import RFC 8032 key, sign, compare to known signature |
+| Object-write-read | Write binary, read back, compare |
+| Object-delete | Write, verify exists, delete, verify gone |
 
 ## wolfCrypt Integration
 
@@ -231,9 +271,9 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 ## Known Issues
 
-- **Ed25519/Curve25519 wolfCrypt test vectors**: The NXP SDK reverses byte order for Montgomery and Edwards curve keys during import/export (`sss_key_store_set_key`/`sss_key_store_get_key`). The wolfCrypt Ed25519 and Curve25519 test vector tests import known keys and compare signatures/shared secrets. The simulator needs to match the SDK's exact byte-reversal convention at each layer (WriteECKey, ReadObject, ECDH Tag2). Key generation and basic operations work correctly through the Rust driver.
+- **Ed25519/Curve25519 wolfCrypt test vectors**: The wolfCrypt SE050 port fails to import Ed25519 keys (`ASN_PARSE_E` in the RFC 8410 DER path when `keyIdSet=0`). This is a wolfCrypt port issue, not a simulator issue — the Ed25519 test vector test passes through the SDK test suite (import + sign + compare to known expected signature).
 
-- **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through the Rust driver tests.
+- **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through both the Rust driver tests and the SDK test suite.
 
 - **SCP03**: Secure Channel Protocol 03 is not implemented. The simulator operates in plain (unauthenticated) mode only.
 
