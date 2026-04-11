@@ -150,10 +150,10 @@ A custom `i2c_a7.c` replaces the NXP SDK's I2C platform layer with TCP socket ca
 | AES, AES192, AES256, AES-CBC, AES-GCM | 5 | Pass |
 | DH, PWDBASED | 2 | Pass |
 | macro, error, MEMORY, base64, asn | 5 | Pass |
-| ECC (P-256 keygen/sign/verify works) | 1 | Fail* |
+| ECC (keygen/sign/verify works, ECDH missing) | 1 | Fail* |
 | RSA | — | Skipped† |
 
-\* ECC test fails at P-224 due to the NXP SDK's `fsl_sss_ftr.h` disabling `SSS_HAVE_EC_NIST_224` for the SE05X_C variant. P-256 sign/verify works correctly. See [Known Issues](#known-issues).
+\* ECC keygen, ECDSA sign, and verify all work for P-224/P-256/P-384. The test fails at ECDH shared secret computation which is not yet implemented. See [Known Issues](#known-issues).
 
 † RSA disabled due to a known wolfCrypt SE050 RSA bug.
 
@@ -223,7 +223,7 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 ## Known Issues
 
-- **ECC P-224**: The NXP Plug&Trust SDK's `fsl_sss_ftr.h` disables `SSS_HAVE_EC_NIST_224` for the SE05X_C applet variant via nested `#undef`/`#define 0` directives. The `add_ecc_header()` function doesn't generate the P-224 DER header, causing `wc_EccPublicKeyDecode()` to fail. P-256 and P-384 work correctly. This is an SDK configuration issue, not a simulator issue.
+- **ECC test (ECDH)**: The wolfCrypt ECC test fails at `Se05x_API_ECDHGenerateSharedSecret_InObject`. ECC key generation, ECDSA signing, and verification all work correctly for P-224, P-256, and P-384. The failure is because ECDH (Elliptic Curve Diffie-Hellman) shared secret computation is not yet implemented in the simulator.
 
 - **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through the Rust driver tests.
 
