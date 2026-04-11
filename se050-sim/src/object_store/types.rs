@@ -59,10 +59,15 @@ pub enum SecureObject {
 }
 
 impl SecureObject {
-    /// Get the SE050 secure object type code.
+    /// Get the SE050 secure object type code (v7.2.0+ curve-specific for EC).
     pub fn type_code(&self) -> u8 {
         match self {
-            SecureObject::ECKeyPair { .. } => 0x01,
+            SecureObject::ECKeyPair { curve, .. } => match curve {
+                ECCurve::NistP224 => 0x25, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P224
+                ECCurve::NistP256 => 0x29, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P256
+                ECCurve::NistP384 => 0x2D, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P384
+                ECCurve::Ed25519 => 0x01,  // generic EC_KEY_PAIR for Ed25519
+            },
             SecureObject::ECPublicKey { .. } => 0x03,
             SecureObject::RSAKeyPair { .. } => 0x04,
             SecureObject::AESKey { .. } => 0x09,
@@ -70,6 +75,19 @@ impl SecureObject {
             SecureObject::UserID { .. } => 0x0C,
             SecureObject::Counter { .. } => 0x0D,
             SecureObject::HMACKey { .. } => 0x11,
+        }
+    }
+
+    /// Get the SE050 EC curve ID for EC key objects.
+    pub fn curve_id(&self) -> Option<u8> {
+        match self {
+            SecureObject::ECKeyPair { curve, .. } => Some(match curve {
+                ECCurve::NistP224 => 0x02,
+                ECCurve::NistP256 => 0x03,
+                ECCurve::NistP384 => 0x04,
+                ECCurve::Ed25519 => 0x40,
+            }),
+            _ => None,
         }
     }
 

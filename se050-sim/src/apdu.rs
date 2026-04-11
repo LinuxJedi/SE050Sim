@@ -195,6 +195,7 @@ pub const P2_TYPE: u8 = 0x26;
 pub const P2_EXIST: u8 = 0x27;
 pub const P2_DELETE_OBJECT: u8 = 0x28;
 pub const P2_DELETE_ALL: u8 = 0x2A;
+pub const P2_ID: u8 = 0x36;
 pub const P2_ENCRYPT_ONESHOT: u8 = 0x37;
 pub const P2_DECRYPT_ONESHOT: u8 = 0x38;
 pub const P2_ENCRYPT_INIT: u8 = 0x42;

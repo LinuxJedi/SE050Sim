@@ -30,6 +30,12 @@ COPY wolfcrypt-test/i2c_a7.c /app/simw-top/hostlib/hostLib/platform/linux/i2c_a7
 # Replace GPIO reset with no-op stub (no GPIO in Docker)
 COPY wolfcrypt-test/se05x_reset.c /app/simw-top/hostlib/hostLib/platform/rsp/se05x_reset.c
 
+# Enable all EC curve features that the default config disables
+COPY wolfcrypt-test/patch_ftr.py /tmp/patch_ftr.py
+RUN python3 /tmp/patch_ftr.py /app/simw-top/fsl_sss_ftr.h && \
+    echo "=== Verify patch ===" && \
+    grep 'SSS_HAVE_EC_NIST_224' /app/simw-top/fsl_sss_ftr.h
+
 # Add our CMakeLists.txt to build SDK as libraries
 COPY wolfcrypt-test/CMakeLists.txt /app/simw-top/CMakeLists.txt
 

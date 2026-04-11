@@ -35,10 +35,25 @@ pub fn dispatch(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
             _ => ApduResponse::error(SW_WRONG_P1P2),
         },
 
-        INS_READ => match cred_type {
-            P1_CRYPTO_OBJ => handlers::crypto_obj::handle_list(apdu, store),
-            P1_CURVE => {
-                // ReadECCurveList: return empty list (curves are implicit)
+        INS_READ => match (cred_type, apdu.p2) {
+            (P1_CRYPTO_OBJ, _) => handlers::crypto_obj::handle_list(apdu, store),
+            (P1_CURVE, P2_ID) => {
+                // EC_CurveGetId: return the curve ID for an EC key object
+                let tlvs = apdu.parse_tlvs().unwrap_or_default();
+                let obj_id = crate::tlv::find_tlv(&tlvs, crate::tlv::TAG_1)
+                    .filter(|t| t.value.len() == 4)
+                    .map(|t| { let mut id = [0u8; 4]; id.copy_from_slice(&t.value); id });
+                match obj_id.and_then(|id| store.get(&id)) {
+                    Some(obj) => match obj.curve_id() {
+                        Some(cid) => ApduResponse::success_with_tlvs(
+                            &[crate::tlv::Tlv::new(crate::tlv::TAG_1, &[cid])]),
+                        None => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+                    },
+                    None => ApduResponse::error(SW_FILE_NOT_FOUND),
+                }
+            }
+            (P1_CURVE, _) => {
+                // ReadECCurveList and other curve operations: return success
                 ApduResponse::success_with_tlvs(&[crate::tlv::Tlv::new(crate::tlv::TAG_1, &[])])
             }
             _ => handlers::object_mgmt::handle_read(apdu, store),
