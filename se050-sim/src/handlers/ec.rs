@@ -285,12 +285,13 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
             let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
             use ed25519_dalek::Signer;
             let sig = signing_key.sign(&input_data);
+            let sig_bytes = sig.to_bytes();
             // SDK reverses each 32-byte half (R, S) of Ed25519 signatures
             // after reading from SE050. Store reversed so SDK produces correct output.
-            let mut sig_bytes = sig.to_bytes();
-            sig_bytes[..32].reverse();
-            sig_bytes[32..].reverse();
-            ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &sig_bytes)])
+            let mut out_bytes = sig_bytes;
+            out_bytes[..32].reverse();
+            out_bytes[32..].reverse();
+            ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &out_bytes)])
         }
         SecureObject::RSAKeyPair { .. } => {
             super::rsa::handle_rsa_sign(&key_obj, algo, &input_data)

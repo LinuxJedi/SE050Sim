@@ -186,20 +186,20 @@ i2c_error_t axI2CRead(void *conn_ctx, unsigned char bus,
         }
     }
 
-    if (rxLen > 64) {
-        /* Large read (buffer flush / NAD scan): read available data, zero-fill rest.
-         * The SDK reads MAX_DATA_LEN (260) to scan for the NAD SOF byte.
-         * On real I2C, the slave sends the frame then 0x00 padding. */
+    if (rxLen > 128) {
+        /* Very large read (buffer flush / NAD scan with MAX_DATA_LEN=260):
+         * read available data, zero-fill rest. */
         memset(pRx, 0, rxLen);
         n = read(ctx->sockfd, pRx, rxLen);
         if (n <= 0) return I2C_FAILED;
         trace_hex("READ-scan", pRx, (int)(n > 16 ? 16 : n));
     } else {
-        /* Small read (frame header/payload): read exactly rxLen bytes.
-         * These are phased reads where the SDK knows the exact byte count. */
+        /* Frame data read: use read_exact to guarantee all bytes arrive.
+         * This handles both small header reads AND medium payload reads
+         * (e.g., 70-byte Ed25519 signature responses). */
         if (read_exact(ctx->sockfd, pRx, rxLen) < 0)
             return I2C_FAILED;
-        trace_hex("READ", pRx, rxLen);
+        trace_hex("READ", pRx, (int)(rxLen > 16 ? 16 : rxLen));
     }
     return I2C_OK;
 }
