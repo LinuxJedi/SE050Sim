@@ -4,7 +4,23 @@ use crate::object_store::ObjectStore;
 use crate::tlv::{self, Tlv, TAG_1, TAG_2, TAG_3, TAG_4, TAG_5, TAG_7};
 
 use ecdsa::signature::{Signer, Verifier};
+use ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
 use rand::rngs::OsRng;
+use sha2::Digest;
+
+/// Hash data according to SE050 EC signature algorithm byte.
+/// Returns the digest to use for prehash sign/verify.
+fn hash_for_algo(algo: u8, data: &[u8]) -> Vec<u8> {
+    match algo {
+        0x09 => data.to_vec(),                          // SigEcdsaPlain: already hashed
+        0x11 => sha1::Sha1::digest(data).to_vec(),      // SigEcdsaSha (SHA-1)
+        0x25 => sha2::Sha224::digest(data).to_vec(),    // SigEcdsaSha224
+        0x21 => sha2::Sha256::digest(data).to_vec(),    // SigEcdsaSha256
+        0x22 => sha2::Sha384::digest(data).to_vec(),    // SigEcdsaSha384
+        0x26 => sha2::Sha512::digest(data).to_vec(),    // SigEcdsaSha512
+        _    => sha2::Sha256::digest(data).to_vec(),    // default to SHA-256
+    }
+}
 
 /// Handle WRITE EC key command (key generation when P2=Default and no private key data).
 pub fn handle_write_ec_key(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
@@ -138,41 +154,47 @@ fn p224_sign(private_key: &[u8], data: &[u8]) -> ApduResponse {
     let Ok(sk) = p224::ecdsa::SigningKey::from_bytes(private_key.into()) else {
         return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
     };
-    let sig: p224::ecdsa::DerSignature = sk.sign(data);
-    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, sig.as_bytes())])
+    let sig: Result<p224::ecdsa::Signature, _> = sk.sign_prehash(data);
+    let Ok(sig) = sig else { return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED) };
+    let der = p224::ecdsa::DerSignature::from(sig);
+    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, der.as_bytes())])
 }
 fn p256_sign(private_key: &[u8], data: &[u8]) -> ApduResponse {
     let Ok(sk) = p256::ecdsa::SigningKey::from_bytes(private_key.into()) else {
         return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
     };
-    let sig: p256::ecdsa::DerSignature = sk.sign(data);
-    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, sig.as_bytes())])
+    let sig: Result<p256::ecdsa::Signature, _> = sk.sign_prehash(data);
+    let Ok(sig) = sig else { return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED) };
+    let der = p256::ecdsa::DerSignature::from(sig);
+    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, der.as_bytes())])
 }
 fn p384_sign(private_key: &[u8], data: &[u8]) -> ApduResponse {
     let Ok(sk) = p384::ecdsa::SigningKey::from_bytes(private_key.into()) else {
         return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
     };
-    let sig: p384::ecdsa::DerSignature = sk.sign(data);
-    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, sig.as_bytes())])
+    let sig: Result<p384::ecdsa::Signature, _> = sk.sign_prehash(data);
+    let Ok(sig) = sig else { return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED) };
+    let der = p384::ecdsa::DerSignature::from(sig);
+    ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, der.as_bytes())])
 }
 
 fn p224_verify(private_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
     let Ok(sk) = p224::ecdsa::SigningKey::from_bytes(private_key.into()) else { return false };
     let vk = sk.verifying_key();
-    let Ok(sig) = p224::ecdsa::DerSignature::try_from(sig_data) else { return false };
-    vk.verify(data, &sig).is_ok()
+    let Ok(sig) = p224::ecdsa::Signature::from_der(sig_data) else { return false };
+    vk.verify_prehash(data, &sig).is_ok()
 }
 fn p256_verify(private_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
     let Ok(sk) = p256::ecdsa::SigningKey::from_bytes(private_key.into()) else { return false };
     let vk = sk.verifying_key();
-    let Ok(sig) = p256::ecdsa::DerSignature::try_from(sig_data) else { return false };
-    vk.verify(data, &sig).is_ok()
+    let Ok(sig) = p256::ecdsa::Signature::from_der(sig_data) else { return false };
+    vk.verify_prehash(data, &sig).is_ok()
 }
 fn p384_verify(private_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
     let Ok(sk) = p384::ecdsa::SigningKey::from_bytes(private_key.into()) else { return false };
     let vk = sk.verifying_key();
-    let Ok(sig) = p384::ecdsa::DerSignature::try_from(sig_data) else { return false };
-    vk.verify(data, &sig).is_ok()
+    let Ok(sig) = p384::ecdsa::Signature::from_der(sig_data) else { return false };
+    vk.verify_prehash(data, &sig).is_ok()
 }
 
 /// Handle signature generation (EC + RSA).
@@ -199,7 +221,7 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
     };
 
     let input_data = match tlv::find_tlv(&tlvs, TAG_3) {
-        Some(t) => &t.value,
+        Some(t) => t.value.clone(),
         None => return ApduResponse::error(SW_WRONG_DATA),
     };
 
@@ -210,13 +232,13 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
 
     match &key_obj {
         SecureObject::ECKeyPair { curve: ECCurve::NistP224, private_key, .. } => {
-            p224_sign(private_key, input_data)
+            p224_sign(private_key, &input_data)
         }
         SecureObject::ECKeyPair { curve: ECCurve::NistP256, private_key, .. } => {
-            p256_sign(private_key, input_data)
+            p256_sign(private_key, &input_data)
         }
         SecureObject::ECKeyPair { curve: ECCurve::NistP384, private_key, .. } => {
-            p384_sign(private_key, input_data)
+            p384_sign(private_key, &input_data)
         }
         SecureObject::ECKeyPair {
             curve: ECCurve::Ed25519,
@@ -230,11 +252,11 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
             key_bytes.copy_from_slice(private_key);
             let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
             use ed25519_dalek::Signer;
-            let signature = signing_key.sign(input_data);
+            let signature = signing_key.sign(&input_data);
             ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &signature.to_bytes())])
         }
         SecureObject::RSAKeyPair { .. } => {
-            super::rsa::handle_rsa_sign(&key_obj, algo, input_data)
+            super::rsa::handle_rsa_sign(&key_obj, algo, &input_data)
         }
         _ => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
     }
@@ -264,7 +286,7 @@ pub fn handle_verify(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse
         _ => return ApduResponse::error(SW_WRONG_DATA),
     };
 
-    // Get data from Tag3. For RSA verify (driver bug), signature is also in Tag3.
+    // Get data from Tag3. Data is pre-hashed (digest) for ECDSA verify.
     let tag3_entries = tlv::find_tlvs(&tlvs, TAG_3);
     let input_data = match tag3_entries.first() {
         Some(t) => t.value.clone(),
@@ -404,18 +426,18 @@ pub fn handle_ecdh(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
 // Verify using raw public key bytes (for ECPublicKey objects)
 fn p224_verify_pubkey(public_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
     let Ok(vk) = p224::ecdsa::VerifyingKey::from_sec1_bytes(public_key) else { return false };
-    let Ok(sig) = p224::ecdsa::DerSignature::try_from(sig_data) else { return false };
-    vk.verify(data, &sig).is_ok()
+    let Ok(sig) = p224::ecdsa::Signature::from_der(sig_data) else { return false };
+    vk.verify_prehash(data, &sig).is_ok()
 }
 fn p256_verify_pubkey(public_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
     let Ok(vk) = p256::ecdsa::VerifyingKey::from_sec1_bytes(public_key) else { return false };
-    let Ok(sig) = p256::ecdsa::DerSignature::try_from(sig_data) else { return false };
-    vk.verify(data, &sig).is_ok()
+    let Ok(sig) = p256::ecdsa::Signature::from_der(sig_data) else { return false };
+    vk.verify_prehash(data, &sig).is_ok()
 }
 fn p384_verify_pubkey(public_key: &[u8], data: &[u8], sig_data: &[u8]) -> bool {
     let Ok(vk) = p384::ecdsa::VerifyingKey::from_sec1_bytes(public_key) else { return false };
-    let Ok(sig) = p384::ecdsa::DerSignature::try_from(sig_data) else { return false };
-    vk.verify(data, &sig).is_ok()
+    let Ok(sig) = p384::ecdsa::Signature::from_der(sig_data) else { return false };
+    vk.verify_prehash(data, &sig).is_ok()
 }
 
 fn p224_ecdh(private_key: &[u8], peer_pubkey: &[u8]) -> Option<Vec<u8>> {
