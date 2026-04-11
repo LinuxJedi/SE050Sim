@@ -1,7 +1,7 @@
 use crate::apdu::*;
 use crate::object_store::types::{ECCurve, SecureObject};
 use crate::object_store::ObjectStore;
-use crate::tlv::{self, Tlv, TAG_1, TAG_2, TAG_3, TAG_5};
+use crate::tlv::{self, Tlv, TAG_1, TAG_2, TAG_3, TAG_5, TAG_7};
 
 use ecdsa::signature::{Signer, Verifier};
 use rand::rngs::OsRng;
@@ -315,4 +315,91 @@ pub fn handle_verify(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse
 
     let result_byte = if result { 0x01 } else { 0x02 };
     ApduResponse::success_with_tlvs(&[Tlv::new(TAG_1, &[result_byte])])
+}
+
+/// Handle ECDH shared secret generation.
+/// INS=Crypto, P1=EC, P2=DH(0x0F)
+/// Tag1=privateKeyID(4B), Tag2=peerPublicKey, Tag7=sharedSecretOutputID(4B)
+/// The shared secret is stored as a binary object at sharedSecretOutputID.
+pub fn handle_ecdh(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
+    let tlvs = match apdu.parse_tlvs() {
+        Ok(t) => t,
+        Err(_) => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let key_id = match tlv::find_tlv(&tlvs, TAG_1) {
+        Some(t) if t.value.len() == 4 => {
+            let mut id = [0u8; 4];
+            id.copy_from_slice(&t.value);
+            id
+        }
+        _ => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let peer_pubkey = match tlv::find_tlv(&tlvs, TAG_2) {
+        Some(t) if !t.value.is_empty() => &t.value,
+        _ => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let output_id = match tlv::find_tlv(&tlvs, TAG_7) {
+        Some(t) if t.value.len() == 4 => {
+            let mut id = [0u8; 4];
+            id.copy_from_slice(&t.value);
+            id
+        }
+        _ => return ApduResponse::error(SW_WRONG_DATA),
+    };
+
+    let key_obj = match store.get(&key_id) {
+        Some(obj) => obj.clone(),
+        None => return ApduResponse::error(SW_FILE_NOT_FOUND),
+    };
+
+    let shared_secret = match &key_obj {
+        SecureObject::ECKeyPair { curve: ECCurve::NistP224, private_key, .. } => {
+            p224_ecdh(private_key, peer_pubkey)
+        }
+        SecureObject::ECKeyPair { curve: ECCurve::NistP256, private_key, .. } => {
+            p256_ecdh(private_key, peer_pubkey)
+        }
+        SecureObject::ECKeyPair { curve: ECCurve::NistP384, private_key, .. } => {
+            p384_ecdh(private_key, peer_pubkey)
+        }
+        _ => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+    };
+
+    match shared_secret {
+        Some(secret) => {
+            // Optionally reverse endianness if P2 indicates DH_REVERSE
+            let secret = if apdu.p2 == 0x2F {
+                secret.into_iter().rev().collect()
+            } else {
+                secret
+            };
+            store.insert(output_id, SecureObject::Binary { data: secret });
+            ApduResponse::success()
+        }
+        None => ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+    }
+}
+
+fn p224_ecdh(private_key: &[u8], peer_pubkey: &[u8]) -> Option<Vec<u8>> {
+    let sk = p224::SecretKey::from_bytes(private_key.into()).ok()?;
+    let peer_pk = p224::PublicKey::from_sec1_bytes(peer_pubkey).ok()?;
+    let shared = p224::ecdh::diffie_hellman(sk.to_nonzero_scalar(), peer_pk.as_affine());
+    Some(shared.raw_secret_bytes().to_vec())
+}
+
+fn p256_ecdh(private_key: &[u8], peer_pubkey: &[u8]) -> Option<Vec<u8>> {
+    let sk = p256::SecretKey::from_bytes(private_key.into()).ok()?;
+    let peer_pk = p256::PublicKey::from_sec1_bytes(peer_pubkey).ok()?;
+    let shared = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), peer_pk.as_affine());
+    Some(shared.raw_secret_bytes().to_vec())
+}
+
+fn p384_ecdh(private_key: &[u8], peer_pubkey: &[u8]) -> Option<Vec<u8>> {
+    let sk = p384::SecretKey::from_bytes(private_key.into()).ok()?;
+    let peer_pk = p384::PublicKey::from_sec1_bytes(peer_pubkey).ok()?;
+    let shared = p384::ecdh::diffie_hellman(sk.to_nonzero_scalar(), peer_pk.as_affine());
+    Some(shared.raw_secret_bytes().to_vec())
 }

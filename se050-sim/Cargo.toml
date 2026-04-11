@@ -10,9 +10,9 @@ embedded-hal = "0.2"
 crc16 = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-p224 = { version = "0.13", features = ["ecdsa"] }
-p256 = { version = "0.13", features = ["ecdsa"] }
-p384 = { version = "0.13", features = ["ecdsa"] }
+p224 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+p384 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 ecdsa = { version = "0.16", features = ["signing", "verifying", "der"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 aes = "0.8"

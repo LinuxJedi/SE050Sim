@@ -64,6 +64,9 @@ pub fn dispatch(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
             (P1_SIGNATURE, P2_SIGN) => handlers::ec::handle_sign(apdu, store),
             (P1_SIGNATURE, P2_VERIFY) => handlers::ec::handle_verify(apdu, store),
 
+            // ECDH shared secret (P2_DH=0x0F or P2_DH_REVERSE)
+            (P1_EC, P2_DH) | (P1_EC, 0x2F) => handlers::ec::handle_ecdh(apdu, store),
+
             // AES cipher oneshot
             (P1_CIPHER, P2_ENCRYPT_ONESHOT) => {
                 handlers::aes::handle_encrypt_oneshot(apdu, store)

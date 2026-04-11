@@ -9,6 +9,7 @@ A software simulator for the NXP SE050 secure element, implementing the full I2C
 - **EdDSA**: Ed25519 key generation, sign/verify
 - **RSA**: 1024–4096 bit key generation, PKCS1v1.5 and PSS sign/verify, PKCS1v1.5 and OAEP encrypt/decrypt
 - **AES**: Key write/generate, AES-CBC encrypt/decrypt (oneshot and multi-step)
+- **ECDH**: Diffie-Hellman shared secret for P-224, P-256, P-384
 - **Digest**: SHA-1, SHA-224, SHA-256, SHA-384, SHA-512 (oneshot and multi-step)
 - **RNG**: Hardware-quality random number generation
 
@@ -223,13 +224,13 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 ## Known Issues
 
-- **ECC test (ECDH)**: The wolfCrypt ECC test fails at `Se05x_API_ECDHGenerateSharedSecret_InObject`. ECC key generation, ECDSA signing, and verification all work correctly for P-224, P-256, and P-384. The failure is because ECDH (Elliptic Curve Diffie-Hellman) shared secret computation is not yet implemented in the simulator.
+- **ECC test (P-224 key import)**: The wolfCrypt ECC test fails when importing a P-224 key pair via the NXP SDK's `sss_se05x_key_store_set_ecc_keypair`. ECC key generation, ECDSA signing, verification, and ECDH all work correctly for P-224, P-256, and P-384. The failure is in the SDK's PKCS#8 DER parser for P-224 key import — no APDU is ever sent to the simulator. This is a wolfCrypt/SDK format compatibility issue, not a simulator issue.
 
 - **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through the Rust driver tests.
 
 - **SCP03**: Secure Channel Protocol 03 is not implemented. The simulator operates in plain (unauthenticated) mode only.
 
-- **ECDH**: EC Diffie-Hellman shared secret computation is not yet implemented.
+- **ECC key import**: The NXP SDK's PKCS#8 parser fails to import P-224 key pairs from wolfCrypt's DER output. This appears to be a wolfCrypt/SDK format compatibility issue.
 
 ## License
 
