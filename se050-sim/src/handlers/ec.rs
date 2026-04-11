@@ -245,10 +245,10 @@ pub fn handle_sign(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
         _ => return ApduResponse::error(SW_WRONG_DATA),
     };
 
-    let input_data = match tlv::find_tlv(&tlvs, TAG_3) {
-        Some(t) => t.value.clone(),
-        None => return ApduResponse::error(SW_WRONG_DATA),
-    };
+    // Tag3 = data to sign (optional — EdDSA can sign empty messages)
+    let input_data = tlv::find_tlv(&tlvs, TAG_3)
+        .map(|t| t.value.clone())
+        .unwrap_or_default();
 
     let key_obj = match store.get(&key_id) {
         Some(obj) => obj.clone(),

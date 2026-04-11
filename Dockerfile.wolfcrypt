@@ -80,7 +80,7 @@ RUN ./configure \
       --enable-cryptocb \
       --enable-ecc \
       --enable-ed25519 \
-      --enable-curve25519 \
+      --disable-curve25519 \
       --enable-sha224 \
       --enable-sha384 \
       --enable-sha512 \
