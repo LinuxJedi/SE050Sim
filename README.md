@@ -151,10 +151,10 @@ A custom `i2c_a7.c` replaces the NXP SDK's I2C platform layer with TCP socket ca
 | AES, AES192, AES256, AES-CBC, AES-GCM | 5 | Pass |
 | DH, PWDBASED | 2 | Pass |
 | macro, error, MEMORY, base64, asn | 5 | Pass |
-| ECC (keygen/sign/verify works, ECDH missing) | 1 | Fail* |
+| ECC (P-224/P-256 fully pass, P-384 vector WIP) | 1 | Fail* |
 | RSA | — | Skipped† |
 
-\* ECC keygen, ECDSA sign, and verify all work for P-224/P-256/P-384. The test fails at ECDH shared secret computation which is not yet implemented. See [Known Issues](#known-issues).
+\* ECC keygen, ECDSA sign/verify, ECDH, key import, and test vectors all pass for P-224 and P-256. P-384 keygen/sign/verify/ECDH pass but the FIPS 186-3 test vector (SHA-1 hash on P-384) fails. See [Known Issues](#known-issues).
 
 † RSA disabled due to a known wolfCrypt SE050 RSA bug.
 
@@ -224,13 +224,13 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 ## Known Issues
 
-- **ECC test (P-224 key import)**: The wolfCrypt ECC test fails when importing a P-224 key pair via the NXP SDK's `sss_se05x_key_store_set_ecc_keypair`. ECC key generation, ECDSA signing, verification, and ECDH all work correctly for P-224, P-256, and P-384. The failure is in the SDK's PKCS#8 DER parser for P-224 key import — no APDU is ever sent to the simulator. This is a wolfCrypt/SDK format compatibility issue, not a simulator issue.
+- **ECC test (P-384 vector)**: The wolfCrypt ECC test fails at `ecc_test_vector 48` — a P-384 ECDSA test vector using a SHA-1 hash (20 bytes). ECC keygen, sign, verify, ECDH, key import, and test vectors all pass for P-224 and P-256. The P-384 prehash verification with a non-native hash size (SHA-1 on a SHA-384 curve) returns false. Under investigation.
 
 - **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through the Rust driver tests.
 
 - **SCP03**: Secure Channel Protocol 03 is not implemented. The simulator operates in plain (unauthenticated) mode only.
 
-- **ECC key import**: The NXP SDK's PKCS#8 parser fails to import P-224 key pairs from wolfCrypt's DER output. This appears to be a wolfCrypt/SDK format compatibility issue.
+- **P-384 test vector**: The FIPS 186-3 P-384 test vector uses SHA-1 (20-byte hash) with a P-384 key. The simulator's prehash verify returns false for this combination. P-384 keygen, sign, verify, and ECDH all work correctly with native-sized hashes.
 
 ## License
 

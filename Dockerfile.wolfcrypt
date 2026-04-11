@@ -87,7 +87,7 @@ RUN ./configure \
       --disable-rsa \
       --disable-examples \
       --enable-crypttests \
-      CFLAGS="-DWOLFSSL_SE050_INIT" \
+      CFLAGS="-DWOLFSSL_SE050_INIT -DECC_USER_CURVES -DHAVE_ECC224 -DHAVE_ECC256 -DHAVE_ECC384" \
       LDFLAGS="-L/app/simw-top/build" \
     2>&1
 
