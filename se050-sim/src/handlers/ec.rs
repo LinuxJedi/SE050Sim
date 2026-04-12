@@ -162,14 +162,26 @@ fn import_ec_key(
     _key_type: u8,
     store: &mut ObjectStore,
 ) -> ApduResponse {
-    // For import, just store the raw key data. We'll reconstruct
-    // the signing key when needed for sign/verify operations.
+    // Ed25519 verify needs the stored public key (ed25519_dalek cannot derive
+    // a verifying key from a signature alone). Derive it at import time.
+    // ECC verify paths derive pub-from-priv on demand so they don't need this.
+    let public_key = match curve {
+        ECCurve::Ed25519 if private_key_data.len() == 32 => {
+            let mut priv_bytes = [0u8; 32];
+            priv_bytes.copy_from_slice(private_key_data);
+            ed25519_dalek::SigningKey::from_bytes(&priv_bytes)
+                .verifying_key()
+                .to_bytes()
+                .to_vec()
+        }
+        _ => vec![],
+    };
     store.insert(
         obj_id,
         SecureObject::ECKeyPair {
             curve,
             private_key: private_key_data.to_vec(),
-            public_key: vec![], // derived on demand
+            public_key,
         },
     );
     ApduResponse::success()
@@ -325,11 +337,9 @@ pub fn handle_verify(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse
     };
 
     // Get data from Tag3. Data is pre-hashed (digest) for ECDSA verify.
+    // EdDSA verify can have an empty message, so TAG_3 may be absent.
     let tag3_entries = tlv::find_tlvs(&tlvs, TAG_3);
-    let input_data = match tag3_entries.first() {
-        Some(t) => t.value.clone(),
-        None => return ApduResponse::error(SW_WRONG_DATA),
-    };
+    let input_data = tag3_entries.first().map(|t| t.value.clone()).unwrap_or_default();
 
     // Signature: try Tag5 first (correct per spec), then second Tag3 (driver bug)
     let sig_data = if let Some(t) = tlv::find_tlv(&tlvs, TAG_5) {

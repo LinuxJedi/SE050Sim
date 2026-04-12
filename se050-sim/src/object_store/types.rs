@@ -68,14 +68,14 @@ impl SecureObject {
                 ECCurve::NistP224 => 0x25, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P224
                 ECCurve::NistP256 => 0x29, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P256
                 ECCurve::NistP384 => 0x2D, // kSE05x_SecObjTyp_EC_KEY_PAIR_NIST_P384
-                ECCurve::Ed25519 => 0x01,
+                ECCurve::Ed25519 => 0x65, // kSE05x_SecObjTyp_EC_KEY_PAIR_ED25519
                 ECCurve::Curve25519 => 0x69, // kSE05x_SecObjTyp_EC_KEY_PAIR_MONT_DH_25519
             },
             SecureObject::ECPublicKey { curve, .. } => match curve {
                 ECCurve::NistP224 => 0x26, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P224
                 ECCurve::NistP256 => 0x2A, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P256
                 ECCurve::NistP384 => 0x2E, // kSE05x_SecObjTyp_EC_PUB_KEY_NIST_P384
-                ECCurve::Ed25519 => 0x03,
+                ECCurve::Ed25519 => 0x67, // kSE05x_SecObjTyp_EC_PUB_KEY_ED25519
                 ECCurve::Curve25519 => 0x6B, // kSE05x_SecObjTyp_EC_PUB_KEY_MONT_DH_25519
             },
             SecureObject::RSAKeyPair { .. } => 0x04,

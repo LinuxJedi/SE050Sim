@@ -271,7 +271,7 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 ## Known Issues
 
-- **Ed25519/Curve25519 wolfCrypt test vectors**: The wolfCrypt SE050 port fails to import Ed25519 keys (`ASN_PARSE_E` in the RFC 8410 DER path when `keyIdSet=0`). This is a wolfCrypt port issue, not a simulator issue — the Ed25519 test vector test passes through the SDK test suite (import + sign + compare to known expected signature).
+- **Ed25519 wolfCrypt test vectors**: wolfCrypt's Ed25519 test fails against the simulator through a chain of upstream issues in the wolfCrypt SE050 port and the NXP SDK. Specifically: (1) `se050_ed25519_verify_msg` never resets `*res = 0` on signature-invalid, leaving stale `res=1` that breaks the bad-msg assertion; (2) `wc_ed25519_import_private_key_ex` does not reset `key->keyIdSet = 0` when the key bytes change, so a subsequent sign reuses the previous iteration's SE050-side keyId; (3) `SE05X_TLV_BUF_SIZE_CMD = 900` in the NXP SDK is too small for Ed25519 test vector 6 (~1023-byte message). None of these are simulator issues — Ed25519 correctness is independently verified via the SDK test suite's `Ed25519-test-vector` test (RFC 8032 signature byte-match). Ed25519 remains `--disable-ed25519` in the wolfCrypt build.
 
 - **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through both the Rust driver tests and the SDK test suite.
 
