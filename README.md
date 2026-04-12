@@ -146,7 +146,7 @@ The simulator has an independent test suite that uses the NXP Plug&Trust SDK's S
 
 ### Test results
 
-All 27 tests pass:
+All 29 tests pass:
 
 | Test | Description |
 |------|-------------|
@@ -168,6 +168,8 @@ All 27 tests pass:
 | RSA-2048-SE050-self-verify | Sign via SE050, verify via SE050, assert bit-flipped sig rejected |
 | RSA-2048-import-sign-verify | OpenSSL generates key, import PKCS#1 `RSAPrivateKey` DER (~1190 B) to SE050, sign, verify with OpenSSL (exercises per-component `WriteRSAKey` path) |
 | RSA-2048-import-sign-verify-pkcs8 | Same but imports PKCS#8 `PrivateKeyInfo` DER (~1218 B) — confirms the host parser accepts both wrappings |
+| RSA-2048-sign-NO_HASH | Sign raw SHA-256 digest via `PKCS1_V1_5_NO_HASH` (SDK pads host-side then does `RSADecrypt(NO_PAD)`); verify by raw-decrypting sig and checking PKCS#1 block structure |
+| RSA-2048-import-sign-NO_HASH | End-to-end wolfCrypt-equivalent flow: OpenSSL-generated PKCS#1 key → `sss_key_store_set_key` → `PKCS1_V1_5_NO_HASH` sign → validate padded block |
 | X25519-ECDH | Two SE050 key pairs, verify shared secrets match |
 | Ed25519-sign-verify | Sign via SE050, verify with both SE050 and OpenSSL |
 | Ed25519-test-vector | Import RFC 8032 key, sign, compare to known signature |

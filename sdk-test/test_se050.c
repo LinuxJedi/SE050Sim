@@ -678,6 +678,91 @@ static void test_rsa_import_sign_verify_pkcs8(const char *name, uint32_t obj_id,
 }
 
 /* ======================================================================
+ * Test: RSA key import + NO_HASH sign (matches wolfCrypt RSA flow)
+ *
+ * wolfCrypt's SE050 RSA port imports the wc_RsaKeyToDer output via
+ * sss_key_store_set_key, then calls sss_asymmetric_sign_digest with
+ * kAlgorithm_SSS_RSASSA_PKCS1_V1_5_NO_HASH. This test reproduces that
+ * exact sequence: import PKCS#1 DER, sign a raw digest with NO_HASH,
+ * validate by raw-RSA-decrypting the signature with OpenSSL. Exercises
+ * both the per-component WriteRSAKey assembly and the host-side PKCS#1
+ * encoder followed by RSADecrypt(NO_PAD) path in one shot.
+ * ====================================================================== */
+static void test_rsa_import_sign_no_hash(void)
+{
+    TEST_BEGIN("RSA-2048-import-sign-NO_HASH");
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+    uint32_t obj_id = OBJ_ID_BASE + 62;
+
+    /* Generate key in OpenSSL, export as PKCS#1 (same as wc_RsaKeyToDer). */
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *gctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (!gctx) TEST_FAIL("CTX_new_id");
+    if (EVP_PKEY_keygen_init(gctx) != 1) TEST_FAIL("keygen_init");
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(gctx, 2048) != 1) TEST_FAIL("keygen_bits");
+    if (EVP_PKEY_keygen(gctx, &pkey) != 1) TEST_FAIL("keygen");
+    EVP_PKEY_CTX_free(gctx);
+
+    uint8_t *der = NULL;
+    int der_len = i2d_PrivateKey(pkey, &der);
+    if (der_len <= 0) TEST_FAIL("i2d_PrivateKey");
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, 256,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "import-no_hash allocate");
+
+    status = sss_key_store_set_key(&g_ks, &key_obj, der,
+                                   (size_t)der_len, 2048, NULL, 0);
+    OPENSSL_free(der);
+    ASSERT_OK(status, "import-no_hash set_key");
+
+    uint8_t hash[32];  memset(hash, 0xA5, sizeof(hash));
+    uint8_t sig[256] = {0};
+    size_t sig_len = sizeof(sig);
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_NO_HASH, kMode_SSS_Sign);
+    ASSERT_OK(status, "import-no_hash sign ctx");
+    status = sss_asymmetric_sign_digest(&asym, hash, 32, sig, &sig_len);
+    ASSERT_OK(status, "import-no_hash sign_digest");
+    sss_asymmetric_context_free(&asym);
+
+    ASSERT_EQ(sig_len, 256, "import-no_hash sig length");
+
+    /* Validate: raw-RSA-decrypt signature, check PKCS1 v1.5 block + hash. */
+    {
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (EVP_PKEY_verify_recover_init(pctx) != 1) TEST_FAIL("recover_init");
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_NO_PADDING) != 1)
+            TEST_FAIL("set_no_padding");
+        uint8_t recovered[256] = {0};
+        size_t rec_len = sizeof(recovered);
+        int rc = EVP_PKEY_verify_recover(pctx, recovered, &rec_len, sig, sig_len);
+        EVP_PKEY_CTX_free(pctx);
+        if (rc != 1) TEST_FAIL("verify_recover");
+        if (recovered[0] != 0x00 || recovered[1] != 0x01)
+            TEST_FAIL("PKCS1 v1.5 prefix");
+        size_t idx = 2;
+        while (idx < 256 && recovered[idx] == 0xFF) idx++;
+        if (recovered[idx] != 0x00) TEST_FAIL("PKCS1 v1.5 separator");
+        idx++;
+        if (256 - idx != 32) TEST_FAILF("hash region %zu bytes", 256 - idx);
+        if (memcmp(&recovered[idx], hash, 32) != 0)
+            TEST_FAIL("hash mismatch after NO_HASH sign (key import likely broken)");
+    }
+
+    EVP_PKEY_free(pkey);
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
  * Test: RSA sign/verify with configurable hash (PKCS#1 v1.5)
  * ====================================================================== */
 static void test_rsa_sign_with_hash(const char *name, uint32_t obj_id,
@@ -869,6 +954,94 @@ static void test_rsa_oaep_encrypt_decrypt(const char *name, uint32_t obj_id,
 
     ASSERT_EQ(dec_len, sizeof(plaintext), "oaep decrypt length mismatch");
     ASSERT_MEM_EQ(decrypted, plaintext, sizeof(plaintext), "oaep roundtrip mismatch");
+
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: RSA PKCS#1 v1.5 NO_HASH sign
+ *
+ * This is the code path wolfCrypt's se050_rsa_sign lands on when the
+ * caller passes a pre-hashed digest with hash=WC_HASH_TYPE_NONE (e.g.
+ * TLS CertificateVerify). The SDK does host-side PKCS#1-v1.5 padding
+ * (no DigestInfo wrap) via pkcs1_v15_encode_no_hash, then issues
+ * RSADecrypt(NO_PAD). We exercise the same algo here and validate the
+ * result by RSA-public-decrypting the signature (RSA_NO_PADDING) and
+ * checking the plaintext matches the expected
+ *   0x00 0x01 0xFF...0xFF 0x00 <digest>
+ * block that the SDK's encoder is supposed to produce.
+ * ====================================================================== */
+static void test_rsa_sign_no_hash(void)
+{
+    TEST_BEGIN("RSA-2048-sign-NO_HASH");
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+    uint32_t obj_id = OBJ_ID_BASE + 61;
+
+    uint8_t pubkey_der[1024] = {0};
+    size_t pubkey_der_len = sizeof(pubkey_der);
+    size_t pubkey_bits = 0;
+    uint8_t hash[32];  memset(hash, 0x9A, sizeof(hash));
+    uint8_t sig[256] = {0};
+    size_t sig_len = sizeof(sig);
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, 256,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "no_hash allocate");
+    status = sss_key_store_generate_key(&g_ks, &key_obj, 2048, NULL);
+    ASSERT_OK(status, "no_hash generate");
+
+    status = sss_key_store_get_key(&g_ks, &key_obj,
+        pubkey_der, &pubkey_der_len, &pubkey_bits);
+    ASSERT_OK(status, "no_hash get_pubkey");
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_NO_HASH, kMode_SSS_Sign);
+    ASSERT_OK(status, "no_hash sign ctx");
+    status = sss_asymmetric_sign_digest(&asym, hash, 32, sig, &sig_len);
+    ASSERT_OK(status, "no_hash sign_digest");
+    sss_asymmetric_context_free(&asym);
+
+    ASSERT_EQ(sig_len, 256, "no_hash sig length");
+
+    /* Raw RSA public-op: m = sig^e mod n. Expect PKCS1-v1.5 pad + raw hash. */
+    {
+        const uint8_t *p = pubkey_der;
+        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pubkey_der_len);
+        if (!pkey) TEST_FAIL("OpenSSL: parse pubkey");
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (EVP_PKEY_verify_recover_init(pctx) != 1) TEST_FAIL("verify_recover_init");
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_NO_PADDING) != 1)
+            TEST_FAIL("set_no_padding");
+
+        uint8_t recovered[256] = {0};
+        size_t rec_len = sizeof(recovered);
+        int rc = EVP_PKEY_verify_recover(pctx, recovered, &rec_len, sig, sig_len);
+        EVP_PKEY_CTX_free(pctx);
+        EVP_PKEY_free(pkey);
+        if (rc != 1) TEST_FAIL("OpenSSL verify_recover failed");
+        if (rec_len != 256) TEST_FAILF("rec_len %zu != 256", rec_len);
+
+        /* Expected encoded block: 00 01 FF*PS 00 hash */
+        if (recovered[0] != 0x00 || recovered[1] != 0x01)
+            TEST_FAIL("missing PKCS1 v1.5 prefix 00 01");
+        /* Locate terminating 0x00 after padding string */
+        size_t idx = 2;
+        while (idx < 256 && recovered[idx] == 0xFF) idx++;
+        if (idx < 10 || idx >= 256 || recovered[idx] != 0x00)
+            TEST_FAIL("malformed PKCS1 v1.5 padding");
+        idx++;
+        if (256 - idx != 32)
+            TEST_FAILF("hash region %zu bytes, expected 32", 256 - idx);
+        if (memcmp(&recovered[idx], hash, 32) != 0)
+            TEST_FAIL("recovered hash does not match input");
+    }
 
     sss_key_store_erase_key(&g_ks, &key_obj);
     sss_key_object_free(&key_obj);
@@ -1377,11 +1550,13 @@ int main(void)
     test_rsa_oaep_encrypt_decrypt("RSA-2048-OAEP-SHA1",
         OBJ_ID_BASE + 57, 2048,
         kAlgorithm_SSS_RSAES_PKCS1_OAEP_SHA1, EVP_sha1());
+    test_rsa_sign_no_hash();
     test_rsa_se050_self_verify();
     test_rsa_import_sign_verify("RSA-2048-import-sign-verify",
         OBJ_ID_BASE + 59, 2048);
     test_rsa_import_sign_verify_pkcs8("RSA-2048-import-sign-verify-pkcs8",
         OBJ_ID_BASE + 60, 2048);
+    test_rsa_import_sign_no_hash();
 
     /* X25519 */
     test_x25519_ecdh();
