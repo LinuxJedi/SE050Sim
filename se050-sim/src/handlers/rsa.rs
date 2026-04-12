@@ -1,17 +1,35 @@
 use crate::apdu::*;
-use crate::object_store::types::SecureObject;
+use crate::object_store::types::{RsaComponents, SecureObject};
 use crate::object_store::ObjectStore;
 use crate::tlv::{self, Tlv, TAG_1, TAG_2, TAG_3};
 
 use rand::rngs::OsRng;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use rsa::signature::SignatureEncoding;
 use sha2::digest::{const_oid::AssociatedOid, Digest, FixedOutputReset};
 
-/// Handle WRITE RSA key (key generation).
-/// P1=RSA(0x02)|KeyPair(0x60), P2=RAW(0x4F)
-/// Tag1=obj_id(4B), Tag2=key_size(2B big-endian, in bits)
+// SE050 WriteRSAKey TLV tag assignments (AN12413 §4.7.1).
+const TAG_RSA_P: u8 = 0x43;      // TAG_3
+const TAG_RSA_Q: u8 = 0x44;      // TAG_4
+const TAG_RSA_DP: u8 = 0x45;     // TAG_5
+const TAG_RSA_DQ: u8 = 0x46;     // TAG_6
+const TAG_RSA_QINV: u8 = 0x47;   // TAG_7
+const TAG_RSA_PUB_EXP: u8 = 0x48; // TAG_8
+const TAG_RSA_PRIV: u8 = 0x49;   // TAG_9
+const TAG_RSA_PUB_MOD: u8 = 0x4A; // TAG_10
+
+/// Handle WRITE RSA key. Serves two scenarios:
+///
+/// * **Keygen** — a single APDU carrying only `TAG_2` (size in bits) with no
+///   key components. The simulator generates a fresh key.
+/// * **Import** — one or more APDUs each carrying a subset of
+///   `{p,q,dp,dq,qInv,pubExp,priv,pubMod}`. The SDK splits DER key material
+///   across multiple APDUs (see `sss_se05x_key_store_set_rsa_key`), so the
+///   simulator accumulates components in `RSAKeyPair::staged` and materializes
+///   a PKCS#1 DER once the set is sufficient (N+E+D, or CRT primes+E+N).
+///
+/// P1 = `P1_RSA | key_part`, P2 = `rsa_format`. Tags 3–10 per the map above.
 pub fn handle_write_rsa_key(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduResponse {
     let tlvs = match apdu.parse_tlvs() {
         Ok(t) => t,
@@ -27,35 +45,109 @@ pub fn handle_write_rsa_key(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduR
         _ => return ApduResponse::error(SW_WRONG_DATA),
     };
 
-    let key_size_bits = match tlv::find_tlv(&tlvs, TAG_2) {
-        Some(t) if t.value.len() == 2 => ((t.value[0] as u16) << 8) | (t.value[1] as u16),
-        _ => return ApduResponse::error(SW_WRONG_DATA),
+    let size_bits_opt = match tlv::find_tlv(&tlvs, TAG_2) {
+        Some(t) if t.value.len() == 2 => {
+            Some(((t.value[0] as u16) << 8) | (t.value[1] as u16))
+        }
+        Some(_) => return ApduResponse::error(SW_WRONG_DATA),
+        None => None,
     };
 
-    let key_size_usize = key_size_bits as usize;
-    if ![1024, 2048, 3072, 4096].contains(&key_size_usize) {
-        return ApduResponse::error(SW_WRONG_DATA);
+    // Collect any key-component TLVs present in this APDU.
+    let comp_p    = tlv::find_tlv(&tlvs, TAG_RSA_P).map(|t| t.value.clone());
+    let comp_q    = tlv::find_tlv(&tlvs, TAG_RSA_Q).map(|t| t.value.clone());
+    let comp_dp   = tlv::find_tlv(&tlvs, TAG_RSA_DP).map(|t| t.value.clone());
+    let comp_dq   = tlv::find_tlv(&tlvs, TAG_RSA_DQ).map(|t| t.value.clone());
+    let comp_qinv = tlv::find_tlv(&tlvs, TAG_RSA_QINV).map(|t| t.value.clone());
+    let comp_e    = tlv::find_tlv(&tlvs, TAG_RSA_PUB_EXP).map(|t| t.value.clone());
+    let comp_d    = tlv::find_tlv(&tlvs, TAG_RSA_PRIV).map(|t| t.value.clone());
+    let comp_n    = tlv::find_tlv(&tlvs, TAG_RSA_PUB_MOD).map(|t| t.value.clone());
+    let has_any_component = comp_p.is_some() || comp_q.is_some() || comp_dp.is_some()
+        || comp_dq.is_some() || comp_qinv.is_some() || comp_e.is_some()
+        || comp_d.is_some() || comp_n.is_some();
+
+    // Keygen: size-only APDU, no component data — generate fresh.
+    if !has_any_component {
+        let Some(key_size_bits) = size_bits_opt else {
+            return ApduResponse::error(SW_WRONG_DATA);
+        };
+        let key_size_usize = key_size_bits as usize;
+        if ![1024, 2048, 3072, 4096].contains(&key_size_usize) {
+            return ApduResponse::error(SW_WRONG_DATA);
+        }
+        let Ok(private_key) = RsaPrivateKey::new(&mut OsRng, key_size_usize) else {
+            return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+        };
+        let Ok(der) = private_key.to_pkcs1_der() else {
+            return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+        };
+        store.insert(
+            obj_id,
+            SecureObject::RSAKeyPair {
+                key_size_bits,
+                private_key_der: der.as_bytes().to_vec(),
+                staged: RsaComponents::default(),
+            },
+        );
+        return ApduResponse::success();
     }
 
-    let private_key = match RsaPrivateKey::new(&mut OsRng, key_size_usize) {
-        Ok(k) => k,
-        Err(_) => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+    // Import path: merge components into a (possibly new) staged key object.
+    let (mut size_bits, mut staged) = match store.get(&obj_id) {
+        Some(SecureObject::RSAKeyPair { key_size_bits, staged, .. }) => {
+            (*key_size_bits, staged.clone())
+        }
+        Some(_) => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+        None => (0, RsaComponents::default()),
     };
+    if let Some(sz) = size_bits_opt {
+        size_bits = sz;
+    }
+    if let Some(v) = comp_p    { staged.p    = Some(v); }
+    if let Some(v) = comp_q    { staged.q    = Some(v); }
+    if let Some(v) = comp_dp   { staged.dp   = Some(v); }
+    if let Some(v) = comp_dq   { staged.dq   = Some(v); }
+    if let Some(v) = comp_qinv { staged.qinv = Some(v); }
+    if let Some(v) = comp_e    { staged.e    = Some(v); }
+    if let Some(v) = comp_d    { staged.d    = Some(v); }
+    if let Some(v) = comp_n    { staged.n    = Some(v); }
 
-    let der = match private_key.to_pkcs1_der() {
-        Ok(d) => d.as_bytes().to_vec(),
-        Err(_) => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
+    // Try to materialize a usable PKCS#1 DER from whatever we have now.
+    let (private_key_der, staged) = match try_materialize(&staged) {
+        Some(der) => (der, RsaComponents::default()),
+        None => (Vec::new(), staged),
     };
 
     store.insert(
         obj_id,
         SecureObject::RSAKeyPair {
-            key_size_bits,
-            private_key_der: der,
+            key_size_bits: size_bits,
+            private_key_der,
+            staged,
         },
     );
-
     ApduResponse::success()
+}
+
+/// Build PKCS#1 DER from staged components when we have at least (N, E, D).
+/// CRT-only staging (primes without E/D/N) is not yet supported — the wolfCrypt
+/// port uses `kSSS_CipherType_RSA` so the SDK sends (E, D, N) across three
+/// APDUs; CRT-style imports would need key reconstruction from primes which
+/// requires computing `d = e⁻¹ mod λ(n)`. Returns `None` if the set is not
+/// yet sufficient, or if `RsaPrivateKey::from_components` rejects the inputs.
+fn try_materialize(staged: &RsaComponents) -> Option<Vec<u8>> {
+    let n_bytes = staged.n.as_deref()?;
+    let e_bytes = staged.e.as_deref()?;
+    let d_bytes = staged.d.as_deref()?;
+    let n = BigUint::from_bytes_be(n_bytes);
+    let e = BigUint::from_bytes_be(e_bytes);
+    let d = BigUint::from_bytes_be(d_bytes);
+    let primes = match (staged.p.as_deref(), staged.q.as_deref()) {
+        (Some(p), Some(q)) => vec![BigUint::from_bytes_be(p), BigUint::from_bytes_be(q)],
+        _ => vec![],
+    };
+    let key = RsaPrivateKey::from_components(n, e, d, primes).ok()?;
+    key.to_pkcs1_der().ok().map(|d| d.as_bytes().to_vec())
 }
 
 /// Handle RSA sign command.

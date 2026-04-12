@@ -24,6 +24,32 @@ impl ECCurve {
     }
 }
 
+/// RSA key components accumulated across per-component `WriteRSAKey` APDUs.
+/// The SDK's `sss_key_store_set_key` for RSA parses the host DER and dispatches
+/// N, E, D (non-CRT) or P, Q, DP, DQ, QINV (CRT) as successive APDUs addressing
+/// the same object ID — none of which individually contain enough data to
+/// reconstruct a usable key. The simulator stages the pieces here until the
+/// set is complete, then materializes the PKCS#1 DER.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RsaComponents {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dq: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qinv: Option<Vec<u8>>,
+}
+
 /// Secure objects stored in the simulator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecureObject {
@@ -40,8 +66,14 @@ pub enum SecureObject {
     },
     RSAKeyPair {
         key_size_bits: u16,
-        /// PKCS#1 DER-encoded private key
+        /// PKCS#1 DER-encoded private key. Empty until enough components have
+        /// been accumulated via per-component `WriteRSAKey` APDUs (or set all
+        /// at once during keygen).
         private_key_der: Vec<u8>,
+        /// Components staged across successive `WriteRSAKey` APDUs. Cleared
+        /// once `private_key_der` is materialized.
+        #[serde(default)]
+        staged: RsaComponents,
     },
     AESKey {
         key: Vec<u8>,
