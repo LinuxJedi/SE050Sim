@@ -193,30 +193,34 @@ wolfCrypt test → SSS API → Se05x APDU layer → smCom → T1oI2C → PAL I2C
 
 A custom `i2c_a7.c` replaces the NXP SDK's I2C platform layer with TCP socket calls. The simulator's TCP server (`tcp_server`) accepts connections on port 8050 and processes T=1 frames identically to how it handles the Rust driver.
 
+### HostCrypto backend
+
+The NXP SDK requires a host-side crypto provider for operations like the PKCS#1 v1.5 padding inside `sss_se05x_asymmetric_sign_digest`. We build the SDK with `PTMW_HostCrypto=WOLFSSL` via wolfSSL's middleware patch at [wolfSSL/osp/nxp-se05x-middleware](https://github.com/wolfSSL/osp/tree/master/nxp-se05x-middleware). This mirrors a real wolfSSL+SE050 deployment and avoids the header clashes that `HostCrypto=OPENSSL` causes when coexisting with wolfSSL's own OpenSSL compatibility layer.
+
+The SDK is pinned to NXP tag [`v04.07.01`](https://github.com/NXP/plug-and-trust/releases/tag/v04.07.01) to match the patch's target version.
+
+Build order is a three-pass bootstrap (required because wolfSSL-with-SE050 links against the SDK and the SDK links against wolfSSL):
+
+1. **Pass-A**: wolfSSL without `--with-se050` (provides `libwolfssl` for the SDK to link against).
+2. **SDK**: patched, `HostCrypto=WOLFSSL`, links against Pass-A wolfSSL.
+3. **Pass-B**: wolfSSL rebuilt with `--with-se050`, links against the patched SDK; overwrites the Pass-A install.
+4. **Test**: `gcc main.o test.o` + final libs.
+
 ### Test results
 
-All 41 wolfCrypt tests pass:
+All wolfCrypt subsystems through AES-GCM pass; RSA is enabled and currently fails at a known upstream wolfSSL-side ASN parse issue being fixed independently:
 
 | Category | Tests | Status |
 |----------|-------|--------|
 | SHA (1/224/256/384/512), SHA-3 | 6 | Pass |
-| RANDOM | 1 | Pass |
-| SHAKE128, SHAKE256, Hash | 3 | Pass |
+| RANDOM, SHAKE128/256, Hash | 4 | Pass |
 | HMAC (SHA/224/256/384/512/SHA3) | 6 | Pass |
 | HMAC-KDF, PRF, TLSv1.3 KDF | 3 | Pass |
 | GMAC, Chacha, POLY1305, ChaPoly | 4 | Pass |
 | AES, AES192, AES256, AES-CBC, AES-GCM | 5 | Pass |
-| DH, PWDBASED | 2 | Pass |
-| ECC (P-224, P-256, P-384 + ECDH + test vectors) | 1 | Pass |
-| MLKEM, logging, time, mutex, memcb | 5 | Pass |
 | macro, error, MEMORY, base64, asn | 5 | Pass |
-| crypto callback | 1 | Pass |
-| RSA | — | Skipped* |
-| Ed25519, Curve25519 | — | Skipped† |
-
-\* RSA disabled due to a known wolfCrypt SE050 RSA bug.
-
-† Ed25519 and Curve25519 disabled in wolfCrypt build due to NXP SDK byte-reversal convention for Montgomery/Edwards curves during key import. Key generation and basic operations work through the Rust driver. See [Known Issues](#known-issues).
+| RSA | — | Fails at upstream ASN parse (-140) — under investigation |
+| Ed25519 | — | Fails at 3 upstream issues (see [Known Issues](#known-issues)) |
 
 ### Building manually
 
@@ -228,37 +232,57 @@ If you want to build outside Docker:
    cargo build --release --bin tcp_server
    ```
 
-2. **Clone and build the NXP Plug&Trust SDK:**
+2. **Clone and patch the NXP Plug&Trust SDK (v04.07.01 + wolfSSL HostCrypto patch):**
    ```bash
-   git clone https://github.com/NXP/plug-and-trust.git simw-top
+   git clone --branch v04.07.01 --depth 1 https://github.com/NXP/plug-and-trust.git simw-top
+   # Apply wolfSSL OSP middleware patch (adds PTMW_HostCrypto=WOLFSSL)
+   curl -fsSL https://raw.githubusercontent.com/wolfSSL/osp/master/nxp-se05x-middleware/simw-top-v040701.patch \
+     | (cd simw-top && patch -p1 -l --forward --fuzz=3)
    # Replace PAL I2C with TCP transport
    cp wolfcrypt-test/i2c_a7.c simw-top/hostlib/hostLib/platform/linux/i2c_a7.c
    cp wolfcrypt-test/se05x_reset.c simw-top/hostlib/hostLib/platform/rsp/se05x_reset.c
-   # Patch EC curve features
+   # Enable EC curves the SDK disables by default
    python3 wolfcrypt-test/patch_ftr.py simw-top/fsl_sss_ftr.h
-   # Add build file and build
+   # Overlay our CMakeLists (builds the six static libs wolfSSL expects)
    cp wolfcrypt-test/CMakeLists.txt simw-top/CMakeLists.txt
+   ```
+
+3. **Pass-A: build wolfSSL without SE050 support** (the patched SDK links against this):
+   ```bash
+   git clone --depth 1 https://github.com/wolfSSL/wolfssl.git
+   cd wolfssl && ./autogen.sh
+   ./configure --enable-keygen --enable-cmac \
+     CFLAGS="-DWOLFSSL_SE050_NO_TRNG -DSIZEOF_LONG_LONG=8"
+   make -j$(nproc) && sudo make install && sudo ldconfig
+   cd ..
+   ```
+
+4. **Build the patched SDK with `HostCrypto=WOLFSSL`:**
+   ```bash
    cd simw-top && mkdir build && cd build
    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-fPIC" \
      -DPTMW_Applet=SE05X_C -DPTMW_SE05X_Auth=None \
-     -DPTMW_SMCOM=T1oI2C -DPTMW_HostCrypto=None -DPTMW_Host=LinuxLike
+     -DPTMW_SMCOM=T1oI2C -DPTMW_HostCrypto=WOLFSSL -DPTMW_Host=LinuxLike
    cmake --build . -j$(nproc)
+   cd ../..
    ```
 
-3. **Build wolfSSL with SE050 support:**
+5. **Pass-B: rebuild wolfSSL with `--with-se050`:**
    ```bash
-   git clone https://github.com/wolfSSL/wolfssl.git
-   cd wolfssl && ./autogen.sh
-   ./configure --with-se050=/path/to/simw-top \
-     --enable-keygen --enable-cryptocb --enable-ecc \
+   cd wolfssl
+   make clean
+   ./configure --with-se050=$PWD/../simw-top \
+     --enable-keygen --enable-cmac --enable-cryptocb --enable-ecc \
+     --enable-ed25519 --enable-curve25519 \
      --enable-sha224 --enable-sha384 --enable-sha512 \
-     --disable-rsa --disable-examples --enable-crypttests \
-     CFLAGS="-DWOLFSSL_SE050_INIT -DECC_USER_CURVES -DHAVE_ECC224 -DHAVE_ECC256 -DHAVE_ECC384" \
-     LDFLAGS="-L/path/to/simw-top/build/sss"
-   make -j$(nproc) && make install
+     --disable-examples --enable-crypttests \
+     CFLAGS="-DWOLFSSL_SE050_INIT -DWOLFSSL_SE050_NO_TRNG -DSIZEOF_LONG_LONG=8 \
+             -DECC_USER_CURVES -DHAVE_ECC224 -DHAVE_ECC256 -DHAVE_ECC384" \
+     LDFLAGS="-L$PWD/../simw-top/build"
+   make -j$(nproc) && sudo make install && sudo ldconfig
    ```
 
-4. **Run:**
+6. **Run:**
    ```bash
    # Terminal 1: start the simulator
    ./se050-sim/target/release/tcp_server
@@ -285,7 +309,7 @@ The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several b
 
 - **Ed25519 wolfCrypt test vectors**: wolfCrypt's Ed25519 test fails against the simulator through a chain of upstream issues in the wolfCrypt SE050 port and the NXP SDK. Specifically: (1) `se050_ed25519_verify_msg` never resets `*res = 0` on signature-invalid, leaving stale `res=1` that breaks the bad-msg assertion; (2) `wc_ed25519_import_private_key_ex` does not reset `key->keyIdSet = 0` when the key bytes change, so a subsequent sign reuses the previous iteration's SE050-side keyId; (3) `SE05X_TLV_BUF_SIZE_CMD = 900` in the NXP SDK is too small for Ed25519 test vector 6 (~1023-byte message). None of these are simulator issues — Ed25519 correctness is independently verified via the SDK test suite's `Ed25519-test-vector` test (RFC 8032 signature byte-match). Ed25519 remains `--disable-ed25519` in the wolfCrypt build.
 
-- **RSA via wolfCrypt**: There is a known bug in wolfCrypt's SE050 RSA integration. RSA works correctly through both the Rust driver tests and the SDK test suite.
+- **RSA via wolfCrypt**: wolfCrypt's RSA test currently fails at a wolfSSL-side ASN parse error (-140) inside `se050_rsa_sign`'s DER handling. The simulator correctly handles the SDK's per-component `WriteRSAKey` sequence and `sss_asymmetric_sign_digest(NO_HASH)` path (verified by `RSA-2048-import-client-key-NO_HASH` in the SDK test suite, which embeds `wolfssl/certs/client-key.der` verbatim and signs successfully). The fix is in flight upstream in wolfSSL.
 
 - **SCP03**: Secure Channel Protocol 03 is not implemented. The simulator operates in plain (unauthenticated) mode only.
 

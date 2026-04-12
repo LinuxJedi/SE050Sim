@@ -7,14 +7,19 @@ SET(SIMW_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 INCLUDE(${SIMW_LIB_DIR}/simw_lib.cmake)
 
 # 1. libSSS_APIs.a in build/sss/
+#
+# HostCrypto backend is wolfSSL (enabled via wolfSSL's OSP middleware patch —
+# see Dockerfile.wolfcrypt). The patch drops fsl_sss_wolfssl_apis.c into
+# sss/src/wolfssl/; we include it explicitly and link wolfssl for its symbols.
 FILE(GLOB SSS_SOURCES
     ${SIMW_LIB_DIR}/sss/src/*.c
     ${SIMW_LIB_DIR}/sss/src/se05x/*.c
     ${SIMW_LIB_DIR}/sss/src/keystore/*.c
-    ${SIMW_LIB_DIR}/sss/src/openssl/fsl_sss_openssl_apis.c
+    ${SIMW_LIB_DIR}/sss/src/wolfssl/fsl_sss_wolfssl_apis.c
 )
 ADD_LIBRARY(SSS_APIs STATIC ${SSS_SOURCES})
 TARGET_INCLUDE_DIRECTORIES(SSS_APIs PUBLIC ${SIMW_INC_DIR})
+TARGET_LINK_LIBRARIES(SSS_APIs PUBLIC wolfssl)
 SET_TARGET_PROPERTIES(SSS_APIs PROPERTIES ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/sss)
 
 # 2. libex_common.a in build/sss/ex/src/

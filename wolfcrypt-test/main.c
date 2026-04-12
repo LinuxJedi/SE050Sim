@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/port/nxp/se050_port.h>
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/random.h>
@@ -27,6 +28,8 @@ int main(void)
 
     printf("=== SE050 Connection Established ===\n");
     fflush(stdout);
+
+    wolfSSL_Init();
 
     /* Quick ECC test before running full suite */
     {
@@ -65,6 +68,7 @@ int main(void)
 
     fflush(stdout);
     fflush(stderr);
+    wolfSSL_Cleanup();
 
     printf("\n=== wolfCrypt Test %s (return code: %d) ===\n",
            ret == 0 ? "PASSED" : "FAILED", ret);
