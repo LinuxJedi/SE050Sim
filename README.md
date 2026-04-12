@@ -146,7 +146,7 @@ The simulator has an independent test suite that uses the NXP Plug&Trust SDK's S
 
 ### Test results
 
-All 18 tests pass:
+All 26 tests pass:
 
 | Test | Description |
 |------|-------------|
@@ -157,8 +157,16 @@ All 18 tests pass:
 | ECDH-P256 | Two SE050 key pairs, verify shared secrets match |
 | AES-128-CBC | Encrypt via SE050, decrypt with OpenSSL, compare |
 | AES-256-CBC | Encrypt via SE050, decrypt with OpenSSL, compare |
-| RSA-2048-sign-verify | RSA PKCS1v1.5 sign via SE050, verify with OpenSSL |
-| RSA-2048-encrypt-decrypt | OpenSSL encrypts, SE050 decrypts, compare plaintext |
+| RSA-2048-sign-verify | RSA PKCS1v1.5-SHA256 sign via SE050, verify with OpenSSL |
+| RSA-2048-encrypt-decrypt | OpenSSL encrypts (PKCS1v1.5), SE050 decrypts, compare |
+| RSA-2048-sign-SHA384 | RSA PKCS1v1.5-SHA384 sign via SE050, verify with OpenSSL |
+| RSA-2048-sign-SHA512 | RSA PKCS1v1.5-SHA512 sign via SE050, verify with OpenSSL |
+| RSA-3072-sign-verify | RSA-3072 sign via SE050, verify with OpenSSL |
+| RSA-4096-sign-verify | RSA-4096 sign via SE050, verify with OpenSSL |
+| RSA-2048-PSS-SHA256 | RSA-PSS sign via SE050, verify with OpenSSL |
+| RSA-2048-OAEP-SHA1 | OpenSSL encrypts (OAEP-SHA1), SE050 decrypts, compare |
+| RSA-2048-SE050-self-verify | Sign via SE050, verify via SE050, assert bit-flipped sig rejected |
+| RSA-2048-import-sign-verify | OpenSSL generates key, import PKCS#8 DER to SE050, sign, verify with OpenSSL (exercises per-component `WriteRSAKey` path) |
 | X25519-ECDH | Two SE050 key pairs, verify shared secrets match |
 | Ed25519-sign-verify | Sign via SE050, verify with both SE050 and OpenSSL |
 | Ed25519-test-vector | Import RFC 8032 key, sign, compare to known signature |

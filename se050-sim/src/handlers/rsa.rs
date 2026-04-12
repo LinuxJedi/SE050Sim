@@ -263,10 +263,29 @@ pub fn handle_rsa_encrypt(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRes
     let ciphertext = match algo {
         0x0A => public_key.encrypt(&mut OsRng, Pkcs1v15Encrypt, plaintext).ok(),
         0x0F => {
+            // SE050's PKCS1_OAEP wire algo is SHA-1 only — the SDK maps
+            // OAEP-SHA256/384/512 to `NA` (unsupported on this silicon).
             use rsa::Oaep;
             public_key
-                .encrypt(&mut OsRng, Oaep::new::<sha2::Sha256>(), plaintext)
+                .encrypt(&mut OsRng, Oaep::new::<sha1::Sha1>(), plaintext)
                 .ok()
+        }
+        0x0C => {
+            // NO_PAD: raw RSA public-key operation (m^e mod n). Used by
+            // sss_se05x_asymmetric_verify_digest to recover the encoded
+            // message from a signature so the SDK can compare on the host.
+            use rsa::traits::PublicKeyParts;
+            let m = rsa::BigUint::from_bytes_be(plaintext);
+            let n = public_key.n();
+            if &m >= n {
+                return ApduResponse::error(SW_WRONG_DATA);
+            }
+            let c = m.modpow(public_key.e(), n);
+            let mod_size = (n.bits() as usize + 7) / 8;
+            let c_bytes = c.to_bytes_be();
+            let mut padded = vec![0u8; mod_size];
+            padded[mod_size - c_bytes.len()..].copy_from_slice(&c_bytes);
+            Some(padded)
         }
         _ => return ApduResponse::error(SW_WRONG_DATA),
     };
@@ -322,9 +341,10 @@ pub fn handle_rsa_decrypt(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRes
     let result = match algo {
         0x0A => private_key.decrypt(Pkcs1v15Encrypt, ciphertext).ok(),
         0x0F => {
+            // See handle_rsa_encrypt: SE050 PKCS1_OAEP = SHA-1 on the wire.
             use rsa::Oaep;
             private_key
-                .decrypt(Oaep::new::<sha2::Sha256>(), ciphertext)
+                .decrypt(Oaep::new::<sha1::Sha1>(), ciphertext)
                 .ok()
         }
         0x0C => {

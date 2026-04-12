@@ -380,7 +380,8 @@ static void test_rsa_sign_verify(const char *name, uint32_t obj_id,
     sss_se05x_object_t key_obj;
     sss_se05x_asymmetric_t asym;
 
-    uint8_t pubkey_der[512] = {0};
+    /* RSA-4096 pubkey DER is ~540 bytes; size for headroom. */
+    uint8_t pubkey_der[1024] = {0};
     size_t pubkey_der_len = sizeof(pubkey_der);
     size_t pubkey_bits = 0;
 
@@ -515,6 +516,342 @@ static void test_rsa_encrypt_decrypt(void)
     /* Compare plaintext */
     ASSERT_EQ(dec_len, sizeof(plaintext), "RSA decrypt length mismatch");
     ASSERT_MEM_EQ(decrypted, plaintext, sizeof(plaintext), "RSA roundtrip mismatch");
+
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: RSA key IMPORT + sign (verified by OpenSSL)
+ *
+ * Generates an RSA keypair in OpenSSL, imports the PKCS#8 DER into the
+ * SE050 via sss_key_store_set_key, signs a digest, and verifies with
+ * OpenSSL. Exercises the SDK's per-component WriteRSAKey dispatch path
+ * (the non-keygen path in sss_se05x_key_store_set_rsa_key), which is
+ * what wolfCrypt's SE050 RSA port relies on.
+ * ====================================================================== */
+static void test_rsa_import_sign_verify(const char *name, uint32_t obj_id,
+                                        int key_bits)
+{
+    TEST_BEGIN(name);
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+
+    /* 1. Generate RSA key in OpenSSL */
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *gctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (!gctx) TEST_FAIL("OpenSSL: EVP_PKEY_CTX_new_id failed");
+    if (EVP_PKEY_keygen_init(gctx) != 1) TEST_FAIL("OpenSSL: keygen_init");
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(gctx, key_bits) != 1)
+        TEST_FAIL("OpenSSL: set_keygen_bits");
+    if (EVP_PKEY_keygen(gctx, &pkey) != 1) TEST_FAIL("OpenSSL: keygen");
+    EVP_PKEY_CTX_free(gctx);
+
+    /* 2. Serialize private key to PKCS#8 DER for SE050 import */
+    uint8_t *pkcs8_der = NULL;
+    int pkcs8_len = i2d_PrivateKey(pkey, &pkcs8_der);
+    if (pkcs8_len <= 0) TEST_FAIL("OpenSSL: i2d_PrivateKey failed");
+
+    /* 3. Import into SE050 */
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, key_bits / 8,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "rsa import key allocate");
+
+    status = sss_key_store_set_key(&g_ks, &key_obj, pkcs8_der,
+                                   (size_t)pkcs8_len, (size_t)key_bits,
+                                   NULL, 0);
+    OPENSSL_free(pkcs8_der);
+    ASSERT_OK(status, "rsa import set_key");
+
+    /* 4. Sign a fixed digest via SE050 */
+    uint8_t hash[32];
+    memset(hash, 0x42, sizeof(hash));
+    uint8_t sig[512] = {0};
+    size_t sig_len = sizeof(sig);
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA256, kMode_SSS_Sign);
+    ASSERT_OK(status, "rsa import sign context_init");
+    status = sss_asymmetric_sign_digest(&asym, hash, 32, sig, &sig_len);
+    ASSERT_OK(status, "rsa import sign_digest");
+    sss_asymmetric_context_free(&asym);
+
+    /* 5. Verify with OpenSSL using the same key's public half */
+    {
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (!pctx) TEST_FAIL("OpenSSL: PKEY_CTX_new");
+        if (EVP_PKEY_verify_init(pctx) != 1) TEST_FAIL("verify_init");
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) != 1)
+            TEST_FAIL("set_padding");
+        if (EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256()) != 1)
+            TEST_FAIL("set_signature_md");
+        int rc = EVP_PKEY_verify(pctx, sig, sig_len, hash, 32);
+        EVP_PKEY_CTX_free(pctx);
+        if (rc != 1) TEST_FAIL("OpenSSL verify of SE050-imported-key signature failed");
+    }
+
+    EVP_PKEY_free(pkey);
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: RSA sign/verify with configurable hash (PKCS#1 v1.5)
+ * ====================================================================== */
+static void test_rsa_sign_with_hash(const char *name, uint32_t obj_id,
+                                    int key_bits, sss_algorithm_t sss_algo,
+                                    const EVP_MD *ossl_md, size_t hash_len)
+{
+    TEST_BEGIN(name);
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+
+    uint8_t pubkey_der[1024] = {0};
+    size_t pubkey_der_len = sizeof(pubkey_der);
+    size_t pubkey_bits = 0;
+    uint8_t hash[64];  /* fits SHA-512 */
+    memset(hash, 0x5A, sizeof(hash));
+    uint8_t sig[512] = {0};
+    size_t sig_len = sizeof(sig);
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, key_bits / 8,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "rsa key allocate");
+    status = sss_key_store_generate_key(&g_ks, &key_obj, key_bits, NULL);
+    ASSERT_OK(status, "rsa key generate");
+
+    status = sss_key_store_get_key(&g_ks, &key_obj,
+        pubkey_der, &pubkey_der_len, &pubkey_bits);
+    ASSERT_OK(status, "rsa get public key");
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        sss_algo, kMode_SSS_Sign);
+    ASSERT_OK(status, "rsa sign context_init");
+    status = sss_asymmetric_sign_digest(&asym, hash, hash_len, sig, &sig_len);
+    ASSERT_OK(status, "rsa sign_digest");
+    sss_asymmetric_context_free(&asym);
+
+    {
+        const uint8_t *p = pubkey_der;
+        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pubkey_der_len);
+        if (!pkey) TEST_FAIL("OpenSSL: parse pubkey");
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (EVP_PKEY_verify_init(pctx) != 1) TEST_FAIL("verify_init");
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) != 1)
+            TEST_FAIL("set_padding");
+        if (EVP_PKEY_CTX_set_signature_md(pctx, ossl_md) != 1)
+            TEST_FAIL("set_signature_md");
+        int rc = EVP_PKEY_verify(pctx, sig, sig_len, hash, hash_len);
+        EVP_PKEY_CTX_free(pctx);
+        EVP_PKEY_free(pkey);
+        if (rc != 1) TEST_FAIL("OpenSSL verify failed");
+    }
+
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: RSA PSS sign/verify
+ * ====================================================================== */
+static void test_rsa_pss_sign_verify(const char *name, uint32_t obj_id,
+                                     int key_bits, sss_algorithm_t sss_algo,
+                                     const EVP_MD *ossl_md, size_t hash_len)
+{
+    TEST_BEGIN(name);
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+
+    uint8_t pubkey_der[1024] = {0};
+    size_t pubkey_der_len = sizeof(pubkey_der);
+    size_t pubkey_bits = 0;
+    uint8_t hash[64];
+    memset(hash, 0x37, sizeof(hash));
+    uint8_t sig[512] = {0};
+    size_t sig_len = sizeof(sig);
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, key_bits / 8,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "rsa-pss key allocate");
+    status = sss_key_store_generate_key(&g_ks, &key_obj, key_bits, NULL);
+    ASSERT_OK(status, "rsa-pss key generate");
+
+    status = sss_key_store_get_key(&g_ks, &key_obj,
+        pubkey_der, &pubkey_der_len, &pubkey_bits);
+    ASSERT_OK(status, "rsa-pss get pubkey");
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        sss_algo, kMode_SSS_Sign);
+    ASSERT_OK(status, "rsa-pss sign context_init");
+    status = sss_asymmetric_sign_digest(&asym, hash, hash_len, sig, &sig_len);
+    ASSERT_OK(status, "rsa-pss sign_digest");
+    sss_asymmetric_context_free(&asym);
+
+    {
+        const uint8_t *p = pubkey_der;
+        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pubkey_der_len);
+        if (!pkey) TEST_FAIL("OpenSSL: parse pubkey");
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (EVP_PKEY_verify_init(pctx) != 1) TEST_FAIL("verify_init");
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) != 1)
+            TEST_FAIL("set_pss_padding");
+        if (EVP_PKEY_CTX_set_signature_md(pctx, ossl_md) != 1)
+            TEST_FAIL("set_signature_md");
+        /* SE050 uses salt_len = hash_len by default */
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, (int)hash_len) != 1)
+            TEST_FAIL("set_pss_saltlen");
+        int rc = EVP_PKEY_verify(pctx, sig, sig_len, hash, hash_len);
+        EVP_PKEY_CTX_free(pctx);
+        EVP_PKEY_free(pkey);
+        if (rc != 1) TEST_FAIL("OpenSSL PSS verify failed");
+    }
+
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: RSA OAEP encrypt/decrypt (OpenSSL encrypts, SE050 decrypts)
+ * ====================================================================== */
+static void test_rsa_oaep_encrypt_decrypt(const char *name, uint32_t obj_id,
+                                          int key_bits,
+                                          sss_algorithm_t sss_algo,
+                                          const EVP_MD *ossl_md)
+{
+    TEST_BEGIN(name);
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+
+    uint8_t pubkey_der[1024] = {0};
+    size_t pubkey_der_len = sizeof(pubkey_der);
+    size_t pubkey_bits = 0;
+    uint8_t plaintext[] = "OAEP padding test message";
+    uint8_t ciphertext[512] = {0};
+    size_t ct_len = sizeof(ciphertext);
+    uint8_t decrypted[512] = {0};
+    size_t dec_len = sizeof(decrypted);
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, key_bits / 8,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "rsa-oaep key allocate");
+    status = sss_key_store_generate_key(&g_ks, &key_obj, key_bits, NULL);
+    ASSERT_OK(status, "rsa-oaep key generate");
+
+    status = sss_key_store_get_key(&g_ks, &key_obj,
+        pubkey_der, &pubkey_der_len, &pubkey_bits);
+    ASSERT_OK(status, "rsa-oaep get pubkey");
+
+    /* OpenSSL encrypt with OAEP */
+    {
+        const uint8_t *p = pubkey_der;
+        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pubkey_der_len);
+        if (!pkey) TEST_FAIL("OpenSSL: parse pubkey");
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (EVP_PKEY_encrypt_init(pctx) != 1) TEST_FAIL("encrypt_init");
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_OAEP_PADDING) != 1)
+            TEST_FAIL("set_oaep_padding");
+        if (EVP_PKEY_CTX_set_rsa_oaep_md(pctx, ossl_md) != 1)
+            TEST_FAIL("set_oaep_md");
+        if (EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, ossl_md) != 1)
+            TEST_FAIL("set_mgf1_md");
+        ct_len = sizeof(ciphertext);
+        int rc = EVP_PKEY_encrypt(pctx, ciphertext, &ct_len,
+                                  plaintext, sizeof(plaintext));
+        EVP_PKEY_CTX_free(pctx);
+        EVP_PKEY_free(pkey);
+        if (rc != 1) TEST_FAIL("OpenSSL OAEP encrypt failed");
+    }
+
+    /* SE050 decrypt */
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        sss_algo, kMode_SSS_Decrypt);
+    ASSERT_OK(status, "rsa-oaep decrypt context_init");
+    status = sss_asymmetric_decrypt(&asym, ciphertext, ct_len,
+                                    decrypted, &dec_len);
+    ASSERT_OK(status, "rsa-oaep decrypt");
+    sss_asymmetric_context_free(&asym);
+
+    ASSERT_EQ(dec_len, sizeof(plaintext), "oaep decrypt length mismatch");
+    ASSERT_MEM_EQ(decrypted, plaintext, sizeof(plaintext), "oaep roundtrip mismatch");
+
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: RSA self-verify (sign via SE050, verify via SE050)
+ *
+ * Some SE050 port bugs can cause sign to silently use a different key
+ * than verify expects — this round-trip catches that even without an
+ * external oracle.
+ * ====================================================================== */
+static void test_rsa_se050_self_verify(void)
+{
+    TEST_BEGIN("RSA-2048-SE050-self-verify");
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+    uint32_t obj_id = OBJ_ID_BASE + 58;
+
+    uint8_t hash[32];
+    memset(hash, 0x77, sizeof(hash));
+    uint8_t sig[256] = {0};
+    size_t sig_len = sizeof(sig);
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, 256,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "self-verify allocate");
+    status = sss_key_store_generate_key(&g_ks, &key_obj, 2048, NULL);
+    ASSERT_OK(status, "self-verify generate");
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA256, kMode_SSS_Sign);
+    ASSERT_OK(status, "self-verify sign ctx");
+    status = sss_asymmetric_sign_digest(&asym, hash, 32, sig, &sig_len);
+    ASSERT_OK(status, "self-verify sign");
+    sss_asymmetric_context_free(&asym);
+
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA256, kMode_SSS_Verify);
+    ASSERT_OK(status, "self-verify verify ctx");
+    status = sss_asymmetric_verify_digest(&asym, hash, 32, sig, sig_len);
+    ASSERT_OK(status, "self-verify verify");
+    sss_asymmetric_context_free(&asym);
+
+    /* Flip one bit in the signature and confirm verify fails. */
+    sig[0] ^= 0x01;
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA256, kMode_SSS_Verify);
+    ASSERT_OK(status, "self-verify verify-bad ctx");
+    sss_status_t bad_status = sss_asymmetric_verify_digest(&asym, hash, 32,
+                                                           sig, sig_len);
+    sss_asymmetric_context_free(&asym);
+    if (bad_status == kStatus_SSS_Success)
+        TEST_FAIL("self-verify: corrupted signature accepted");
 
     sss_key_store_erase_key(&g_ks, &key_obj);
     sss_key_object_free(&key_obj);
@@ -948,6 +1285,25 @@ int main(void)
     /* RSA */
     test_rsa_sign_verify("RSA-2048-sign-verify", OBJ_ID_BASE + 50, 2048);
     test_rsa_encrypt_decrypt();
+    test_rsa_sign_with_hash("RSA-2048-sign-SHA384",
+        OBJ_ID_BASE + 52, 2048,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA384, EVP_sha384(), 48);
+    test_rsa_sign_with_hash("RSA-2048-sign-SHA512",
+        OBJ_ID_BASE + 53, 2048,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA512, EVP_sha512(), 64);
+    test_rsa_sign_verify("RSA-3072-sign-verify", OBJ_ID_BASE + 54, 3072);
+    test_rsa_sign_verify("RSA-4096-sign-verify", OBJ_ID_BASE + 55, 4096);
+    test_rsa_pss_sign_verify("RSA-2048-PSS-SHA256",
+        OBJ_ID_BASE + 56, 2048,
+        kAlgorithm_SSS_RSASSA_PKCS1_PSS_MGF1_SHA256, EVP_sha256(), 32);
+    /* Only OAEP-SHA1 maps to a real on-wire algo on SE050 silicon; the NXP
+     * SDK routes OAEP-SHA256/384/512 to RSAEncryptionAlgo_NA. */
+    test_rsa_oaep_encrypt_decrypt("RSA-2048-OAEP-SHA1",
+        OBJ_ID_BASE + 57, 2048,
+        kAlgorithm_SSS_RSAES_PKCS1_OAEP_SHA1, EVP_sha1());
+    test_rsa_se050_self_verify();
+    test_rsa_import_sign_verify("RSA-2048-import-sign-verify",
+        OBJ_ID_BASE + 59, 2048);
 
     /* X25519 */
     test_x25519_ecdh();
