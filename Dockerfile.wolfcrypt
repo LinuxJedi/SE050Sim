@@ -15,7 +15,7 @@ FROM debian:bookworm
 
 RUN apt-get update && apt-get install -y \
     build-essential cmake git autoconf automake libtool \
-    python3 pkg-config wget \
+    python3 pkg-config wget libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=sim-builder /app/se050-sim/target/release/tcp_server /app/se050-sim-server
@@ -47,7 +47,7 @@ RUN mkdir -p /app/simw-top/build && cd /app/simw-top/build && \
       -DPTMW_Applet=SE05X_C \
       -DPTMW_SE05X_Auth=None \
       -DPTMW_SMCOM=T1oI2C \
-      -DPTMW_HostCrypto=None \
+      -DPTMW_HostCrypto=OPENSSL \
       -DPTMW_Host=LinuxLike \
     2>&1 && \
     cmake --build . -j$(nproc) 2>&1
@@ -78,6 +78,7 @@ RUN ./configure \
       --with-se050=/app/simw-top \
       --enable-keygen \
       --enable-cryptocb \
+      --enable-cryptonly \
       --enable-ecc \
       --enable-ed25519 \
       --enable-curve25519 \
@@ -89,6 +90,7 @@ RUN ./configure \
       --enable-crypttests \
       CFLAGS="-DWOLFSSL_SE050_INIT -DECC_USER_CURVES -DHAVE_ECC224 -DHAVE_ECC256 -DHAVE_ECC384" \
       LDFLAGS="-L/app/simw-top/build" \
+      LIBS="-lssl -lcrypto" \
     2>&1
 
 RUN make -j$(nproc) 2>&1
@@ -127,7 +129,7 @@ RUN gcc -o /app/wolfcrypt_se050_test /tmp/main.o /tmp/test.o \
     -L/app/simw-top/build/hostlib/hostLib/libCommon/log \
     -L/app/simw-top/build/hostlib/hostLib/libCommon \
     -lwolfssl -lSSS_APIs -lex_common -lse05x -la7x_utils -lmwlog -lsmCom \
-    -lpthread -lm \
+    -lssl -lcrypto -lpthread -lm \
     2>&1
 
 # ---- Run test ----
