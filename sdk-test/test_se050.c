@@ -549,7 +549,10 @@ static void test_rsa_import_sign_verify(const char *name, uint32_t obj_id,
     if (EVP_PKEY_keygen(gctx, &pkey) != 1) TEST_FAIL("OpenSSL: keygen");
     EVP_PKEY_CTX_free(gctx);
 
-    /* 2. Serialize private key to PKCS#8 DER for SE050 import */
+    /* 2. Serialize private key. i2d_PrivateKey emits the key in its native
+     * DER: for RSA that's PKCS#1 RSAPrivateKey, *not* PKCS#8 (RSA-2048 PKCS#1
+     * is ~1190 B vs ~1218 B PKCS#8-wrapped). This test exercises the PKCS#1
+     * path; test_rsa_import_sign_verify_pkcs8 covers the PKCS#8 wrap path. */
     uint8_t *pkcs8_der = NULL;
     int pkcs8_len = i2d_PrivateKey(pkey, &pkcs8_der);
     if (pkcs8_len <= 0) TEST_FAIL("OpenSSL: i2d_PrivateKey failed");
@@ -593,6 +596,79 @@ static void test_rsa_import_sign_verify(const char *name, uint32_t obj_id,
         int rc = EVP_PKEY_verify(pctx, sig, sig_len, hash, 32);
         EVP_PKEY_CTX_free(pctx);
         if (rc != 1) TEST_FAIL("OpenSSL verify of SE050-imported-key signature failed");
+    }
+
+    EVP_PKEY_free(pkey);
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
+ * Test: RSA key import as PKCS#8 PrivateKeyInfo + sign
+ *
+ * Parallels test_rsa_import_sign_verify but wraps the key in a PKCS#8
+ * PrivateKeyInfo (RFC 5208) rather than the raw PKCS#1 RSAPrivateKey.
+ * Both formats should be accepted by sss_util_asn1_rsa_parse_private; a
+ * failure of only one of the two tests pinpoints which format the host
+ * parser actually requires.
+ * ====================================================================== */
+static void test_rsa_import_sign_verify_pkcs8(const char *name, uint32_t obj_id,
+                                              int key_bits)
+{
+    TEST_BEGIN(name);
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *gctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (!gctx) TEST_FAIL("OpenSSL: CTX_new_id");
+    if (EVP_PKEY_keygen_init(gctx) != 1) TEST_FAIL("OpenSSL: keygen_init");
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(gctx, key_bits) != 1)
+        TEST_FAIL("OpenSSL: keygen_bits");
+    if (EVP_PKEY_keygen(gctx, &pkey) != 1) TEST_FAIL("OpenSSL: keygen");
+    EVP_PKEY_CTX_free(gctx);
+
+    /* PKCS#8 wrap via PKCS8_PRIV_KEY_INFO + i2d */
+    PKCS8_PRIV_KEY_INFO *p8inf = EVP_PKEY2PKCS8(pkey);
+    if (!p8inf) TEST_FAIL("OpenSSL: EVP_PKEY2PKCS8");
+    uint8_t *p8_der = NULL;
+    int p8_len = i2d_PKCS8_PRIV_KEY_INFO(p8inf, &p8_der);
+    PKCS8_PRIV_KEY_INFO_free(p8inf);
+    if (p8_len <= 0) TEST_FAIL("OpenSSL: i2d_PKCS8");
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Pair, kSSS_CipherType_RSA, key_bits / 8,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "pkcs8 allocate");
+
+    status = sss_key_store_set_key(&g_ks, &key_obj, p8_der,
+                                   (size_t)p8_len, (size_t)key_bits,
+                                   NULL, 0);
+    OPENSSL_free(p8_der);
+    ASSERT_OK(status, "pkcs8 set_key");
+
+    uint8_t hash[32]; memset(hash, 0x42, sizeof(hash));
+    uint8_t sig[512] = {0};
+    size_t sig_len = sizeof(sig);
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA256, kMode_SSS_Sign);
+    ASSERT_OK(status, "pkcs8 sign ctx");
+    status = sss_asymmetric_sign_digest(&asym, hash, 32, sig, &sig_len);
+    ASSERT_OK(status, "pkcs8 sign");
+    sss_asymmetric_context_free(&asym);
+
+    {
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        EVP_PKEY_verify_init(pctx);
+        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING);
+        EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256());
+        int rc = EVP_PKEY_verify(pctx, sig, sig_len, hash, 32);
+        EVP_PKEY_CTX_free(pctx);
+        if (rc != 1) TEST_FAIL("OpenSSL verify PKCS#8-imported sig failed");
     }
 
     EVP_PKEY_free(pkey);
@@ -1304,6 +1380,8 @@ int main(void)
     test_rsa_se050_self_verify();
     test_rsa_import_sign_verify("RSA-2048-import-sign-verify",
         OBJ_ID_BASE + 59, 2048);
+    test_rsa_import_sign_verify_pkcs8("RSA-2048-import-sign-verify-pkcs8",
+        OBJ_ID_BASE + 60, 2048);
 
     /* X25519 */
     test_x25519_ecdh();
