@@ -428,3 +428,91 @@ where
     };
     verifying_key.verify(data, &sig).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_store::ObjectStore;
+    use rsa::signature::Signer;
+    use rsa::traits::PublicKeyParts;
+
+    /// Regression test for the "verify with public-only key" fix: after a
+    /// public-only import (SDK sends N and E via separate WriteRSAKey APDUs),
+    /// `private_key_der` stays empty and N+E live only in `staged`. Verify and
+    /// encrypt must still succeed by rebuilding `RsaPublicKey` from `staged`.
+    fn make_public_only_keypair(pk: &RsaPublicKey, bits: u16) -> SecureObject {
+        let mut staged = RsaComponents::default();
+        staged.n = Some(pk.n().to_bytes_be());
+        staged.e = Some(pk.e().to_bytes_be());
+        SecureObject::RSAKeyPair {
+            key_size_bits: bits,
+            private_key_der: Vec::new(),
+            staged,
+        }
+    }
+
+    #[test]
+    fn verify_works_with_public_only_key() {
+        let sk = RsaPrivateKey::new(&mut OsRng, 1024).unwrap();
+        let pk = RsaPublicKey::from(&sk);
+        let obj = make_public_only_keypair(&pk, 1024);
+
+        // Sign out-of-band with PKCS#1 v1.5 SHA-256 (algo 0x28).
+        let data = b"public-only verify regression";
+        let signing_key = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(sk);
+        let sig = signing_key.sign(data).to_vec();
+
+        let resp = handle_rsa_verify(&obj, 0x28, data, &sig);
+        assert_eq!(resp.sw, 0x9000, "verify returned {:04x}", resp.sw);
+        let tlvs = crate::tlv::parse_tlvs(&resp.data).unwrap();
+        assert_eq!(tlvs[0].value, [0x01], "verify should report success");
+
+        // Bad signature must still reach the RSA code path (no longer 0x6985)
+        // and come back as verify=failure.
+        let mut bad = sig.clone();
+        bad[0] ^= 0x01;
+        let resp_bad = handle_rsa_verify(&obj, 0x28, data, &bad);
+        assert_eq!(resp_bad.sw, 0x9000);
+        let tlvs_bad = crate::tlv::parse_tlvs(&resp_bad.data).unwrap();
+        assert_eq!(tlvs_bad[0].value, [0x02],
+                   "corrupted sig should report verify=failure");
+    }
+
+    #[test]
+    fn encrypt_works_with_public_only_key() {
+        let sk = RsaPrivateKey::new(&mut OsRng, 1024).unwrap();
+        let pk = RsaPublicKey::from(&sk);
+        let obj_id = [0x30u8, 0x00, 0x00, 0xEE];
+        let mut store = ObjectStore::new();
+        store.insert(obj_id, make_public_only_keypair(&pk, 1024));
+
+        // Craft an RSA-encrypt APDU (P1=RSA, P2=EncryptOneshot) with
+        // TAG_1=key_id, TAG_2=algo(PKCS1v1.5=0x0A), TAG_3=plaintext.
+        let plaintext = b"hello";
+        let mut data = Vec::new();
+        data.extend_from_slice(&Tlv::new(TAG_1, &obj_id).encode());
+        data.extend_from_slice(&Tlv::new(TAG_2, &[0x0A]).encode());
+        data.extend_from_slice(&Tlv::new(TAG_3, plaintext).encode());
+        let apdu = crate::apdu::ParsedApdu {
+            cla: 0x80,
+            ins: 0x03,
+            p1: crate::apdu::P1_RSA,
+            p2: crate::apdu::P2_ENCRYPT_ONESHOT,
+            data,
+            le: None,
+        };
+
+        let resp = handle_rsa_encrypt(&apdu, &mut store);
+        assert_eq!(resp.sw, 0x9000, "encrypt returned {:04x}", resp.sw);
+        let tlvs = crate::tlv::parse_tlvs(&resp.data).unwrap();
+        assert_eq!(tlvs[0].value.len(), 128,
+                   "ciphertext should be one modulus (1024/8=128)");
+
+        // Ensure it really encrypted for *this* key by decrypting with the
+        // private half and checking the plaintext round-trips.
+        let recovered = sk
+            .decrypt(Pkcs1v15Encrypt, &tlvs[0].value)
+            .expect("decrypt");
+        assert_eq!(recovered, plaintext);
+    }
+}

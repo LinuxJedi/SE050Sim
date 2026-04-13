@@ -922,6 +922,90 @@ static void test_rsa_import_wolfssl_client_key_no_hash(void)
 }
 
 /* ======================================================================
+ * Test: RSA public-only import + verify (regression for sim fix
+ *        "rsa: fix verify with public-only key")
+ *
+ * Imports just the RSA public half (N, E) via kSSS_KeyPart_Public, then
+ * asks the SE050 to verify a signature produced off-card by OpenSSL. The
+ * simulator previously required a materialized private_key_der and would
+ * return 0x6985 for this flow even though verify only needs N and E.
+ * ====================================================================== */
+static void test_rsa_public_only_verify(void)
+{
+    TEST_BEGIN("RSA-2048-public-only-verify");
+    sss_status_t status;
+    sss_se05x_object_t key_obj;
+    sss_se05x_asymmetric_t asym;
+    uint32_t obj_id = OBJ_ID_BASE + 64;
+
+    /* 1. Generate keypair in OpenSSL; the SE050 will only see the public half. */
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *gctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (!gctx) TEST_FAIL("CTX_new_id");
+    if (EVP_PKEY_keygen_init(gctx) != 1) TEST_FAIL("keygen_init");
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(gctx, 2048) != 1) TEST_FAIL("keygen_bits");
+    if (EVP_PKEY_keygen(gctx, &pkey) != 1) TEST_FAIL("keygen");
+    EVP_PKEY_CTX_free(gctx);
+
+    /* 2. Sign a fixed hash with OpenSSL (PKCS#1 v1.5 SHA-256). */
+    uint8_t hash[32]; memset(hash, 0x42, sizeof(hash));
+    uint8_t sig[256] = {0};
+    size_t sig_len = sizeof(sig);
+    {
+        EVP_PKEY_CTX *sctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (EVP_PKEY_sign_init(sctx) != 1) TEST_FAIL("sign_init");
+        if (EVP_PKEY_CTX_set_rsa_padding(sctx, RSA_PKCS1_PADDING) != 1)
+            TEST_FAIL("sign set_padding");
+        if (EVP_PKEY_CTX_set_signature_md(sctx, EVP_sha256()) != 1)
+            TEST_FAIL("sign set_md");
+        if (EVP_PKEY_sign(sctx, sig, &sig_len, hash, 32) != 1)
+            TEST_FAIL("OpenSSL sign");
+        EVP_PKEY_CTX_free(sctx);
+    }
+
+    /* 3. Export SubjectPublicKeyInfo DER and import into SE050 as public-only. */
+    uint8_t *pub_der = NULL;
+    int pub_len = i2d_PUBKEY(pkey, &pub_der);
+    if (pub_len <= 0) TEST_FAIL("i2d_PUBKEY");
+
+    cleanup_object(obj_id);
+    sss_key_object_init(&key_obj, &g_ks);
+    status = sss_key_object_allocate_handle(&key_obj, obj_id,
+        kSSS_KeyPart_Public, kSSS_CipherType_RSA, 256,
+        kKeyObject_Mode_Persistent);
+    ASSERT_OK(status, "public-only allocate");
+
+    status = sss_key_store_set_key(&g_ks, &key_obj, pub_der,
+                                   (size_t)pub_len, 2048, NULL, 0);
+    OPENSSL_free(pub_der);
+    ASSERT_OK(status, "public-only set_key");
+
+    /* 4. Verify via SE050 — this is the code path the commit repaired. */
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA256, kMode_SSS_Verify);
+    ASSERT_OK(status, "public-only verify ctx");
+    status = sss_asymmetric_verify_digest(&asym, hash, 32, sig, sig_len);
+    ASSERT_OK(status, "public-only verify");
+    sss_asymmetric_context_free(&asym);
+
+    /* 5. And: flipping a signature bit must still be rejected, proving the
+     *    verify isn't vacuously succeeding. */
+    sig[0] ^= 0x01;
+    status = sss_asymmetric_context_init(&asym, &g_ctx.session, &key_obj,
+        kAlgorithm_SSS_RSASSA_PKCS1_V1_5_SHA256, kMode_SSS_Verify);
+    ASSERT_OK(status, "public-only verify-bad ctx");
+    sss_status_t bad = sss_asymmetric_verify_digest(&asym, hash, 32, sig, sig_len);
+    sss_asymmetric_context_free(&asym);
+    if (bad == kStatus_SSS_Success)
+        TEST_FAIL("public-only verify accepted corrupted signature");
+
+    EVP_PKEY_free(pkey);
+    sss_key_store_erase_key(&g_ks, &key_obj);
+    sss_key_object_free(&key_obj);
+    TEST_PASS();
+}
+
+/* ======================================================================
  * Test: RSA sign/verify with configurable hash (PKCS#1 v1.5)
  * ====================================================================== */
 static void test_rsa_sign_with_hash(const char *name, uint32_t obj_id,
@@ -1717,6 +1801,7 @@ int main(void)
         OBJ_ID_BASE + 60, 2048);
     test_rsa_import_sign_no_hash();
     test_rsa_import_wolfssl_client_key_no_hash();
+    test_rsa_public_only_verify();
 
     /* X25519 */
     test_x25519_ecdh();
