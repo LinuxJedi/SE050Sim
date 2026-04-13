@@ -184,6 +184,23 @@ pub fn handle_rsa_sign(
     }
 }
 
+/// Build an `RsaPublicKey` from an RSA object, supporting both full keypair
+/// imports (materialized `private_key_der`) and public-only imports (only N
+/// and E staged). Returns `None` if neither form has enough material.
+fn public_key_from_obj(key_obj: &SecureObject) -> Option<RsaPublicKey> {
+    let SecureObject::RSAKeyPair { private_key_der, staged, .. } = key_obj else {
+        return None;
+    };
+    if !private_key_der.is_empty() {
+        return RsaPrivateKey::from_pkcs1_der(private_key_der)
+            .ok()
+            .map(|k| RsaPublicKey::from(&k));
+    }
+    let n = staged.n.as_deref()?;
+    let e = staged.e.as_deref()?;
+    RsaPublicKey::new(BigUint::from_bytes_be(n), BigUint::from_bytes_be(e)).ok()
+}
+
 /// Handle RSA verify command.
 pub fn handle_rsa_verify(
     key_obj: &SecureObject,
@@ -191,15 +208,10 @@ pub fn handle_rsa_verify(
     data: &[u8],
     signature: &[u8],
 ) -> ApduResponse {
-    let SecureObject::RSAKeyPair { private_key_der, .. } = key_obj else {
-        return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+    let public_key = match public_key_from_obj(key_obj) {
+        Some(k) => k,
+        None => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
     };
-
-    let private_key = match RsaPrivateKey::from_pkcs1_der(private_key_der) {
-        Ok(k) => k,
-        Err(_) => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
-    };
-    let public_key = RsaPublicKey::from(&private_key);
 
     let ok = match algo {
         // PKCS#1 v1.5 variants
@@ -250,15 +262,10 @@ pub fn handle_rsa_encrypt(apdu: &ParsedApdu, store: &mut ObjectStore) -> ApduRes
         None => return ApduResponse::error(SW_FILE_NOT_FOUND),
     };
 
-    let SecureObject::RSAKeyPair { private_key_der, .. } = &key_obj else {
-        return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED);
+    let public_key = match public_key_from_obj(&key_obj) {
+        Some(k) => k,
+        None => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
     };
-
-    let private_key = match RsaPrivateKey::from_pkcs1_der(private_key_der) {
-        Ok(k) => k,
-        Err(_) => return ApduResponse::error(SW_CONDITIONS_NOT_SATISFIED),
-    };
-    let public_key = RsaPublicKey::from(&private_key);
 
     let ciphertext = match algo {
         0x0A => public_key.encrypt(&mut OsRng, Pkcs1v15Encrypt, plaintext).ok(),
