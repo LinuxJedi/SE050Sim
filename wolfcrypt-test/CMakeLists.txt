@@ -8,18 +8,25 @@ INCLUDE(${SIMW_LIB_DIR}/simw_lib.cmake)
 
 # 1. libSSS_APIs.a in build/sss/
 #
-# HostCrypto backend is wolfSSL (enabled via wolfSSL's OSP middleware patch —
-# see Dockerfile.wolfcrypt). The patch drops fsl_sss_wolfssl_apis.c into
-# sss/src/wolfssl/; we include it explicitly and link wolfssl for its symbols.
+# HostCrypto backend is picked by PTMW_HostCrypto (set at cmake configure):
+#   OPENSSL  → sss/src/openssl/fsl_sss_openssl_apis.c (sdk-test uses this)
+#   WOLFSSL  → sss/src/wolfssl/fsl_sss_wolfssl_apis.c, added by wolfSSL's OSP
+#              middleware patch (wolfcrypt-test uses this)
 FILE(GLOB SSS_SOURCES
     ${SIMW_LIB_DIR}/sss/src/*.c
     ${SIMW_LIB_DIR}/sss/src/se05x/*.c
     ${SIMW_LIB_DIR}/sss/src/keystore/*.c
-    ${SIMW_LIB_DIR}/sss/src/wolfssl/fsl_sss_wolfssl_apis.c
 )
+IF("${PTMW_HostCrypto}" STREQUAL "WOLFSSL")
+    LIST(APPEND SSS_SOURCES ${SIMW_LIB_DIR}/sss/src/wolfssl/fsl_sss_wolfssl_apis.c)
+ELSE()
+    LIST(APPEND SSS_SOURCES ${SIMW_LIB_DIR}/sss/src/openssl/fsl_sss_openssl_apis.c)
+ENDIF()
 ADD_LIBRARY(SSS_APIs STATIC ${SSS_SOURCES})
 TARGET_INCLUDE_DIRECTORIES(SSS_APIs PUBLIC ${SIMW_INC_DIR})
-TARGET_LINK_LIBRARIES(SSS_APIs PUBLIC wolfssl)
+IF("${PTMW_HostCrypto}" STREQUAL "WOLFSSL")
+    TARGET_LINK_LIBRARIES(SSS_APIs PUBLIC wolfssl)
+ENDIF()
 SET_TARGET_PROPERTIES(SSS_APIs PROPERTIES ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/sss)
 
 # 2. libex_common.a in build/sss/ex/src/

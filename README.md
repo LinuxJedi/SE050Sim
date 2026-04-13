@@ -293,9 +293,9 @@ If you want to build outside Docker:
    ./wolfcrypt_se050_test
    ```
 
-## NXP Driver Patches
+## NXP Driver Fork
 
-The [nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several bugs that are patched automatically (see `patches/apply.sh`):
+The upstream [imrank03/nxp-se050](https://github.com/imrank03/nxp-se050) Rust driver has several bugs that blocked integration testing. Fixes live on the [`sim-compat`](https://github.com/LinuxJedi/nxp-se050/tree/sim-compat) branch of our fork, which the Dockerfiles clone directly:
 
 | Bug | Fix |
 |-----|-----|
