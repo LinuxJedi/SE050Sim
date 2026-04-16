@@ -19,8 +19,6 @@ export SE050_SIM_PORT=8050
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 echo "=== Running wolfCrypt Test Suite ==="
-echo "(RSA tests disabled due to known SE050 RSA bug in wolfCrypt)"
-echo ""
 
 /app/wolfcrypt_se050_test
 TEST_RESULT=$?
