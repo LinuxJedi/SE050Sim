@@ -55,7 +55,7 @@ docker build -f Dockerfile.wolfcrypt -t se050-sim-wolfcrypt .
 docker run se050-sim-wolfcrypt
 ```
 
-This builds a full integration with wolfSSL and the NXP Plug&Trust SDK, then runs the wolfCrypt cryptographic test suite against the simulator. **All 41 tests pass.** See [wolfCrypt Integration](#wolfcrypt-integration) for details.
+This builds a full integration with wolfSSL and the NXP Plug&Trust SDK, then runs the wolfCrypt cryptographic test suite against the simulator. **All 46 tests pass.** See [wolfCrypt Integration](#wolfcrypt-integration) for details.
 
 ## Architecture
 
@@ -208,19 +208,22 @@ Build order is a three-pass bootstrap (required because wolfSSL-with-SE050 links
 
 ### Test results
 
-All wolfCrypt subsystems through AES-GCM pass; RSA is enabled and currently fails at a known upstream wolfSSL-side ASN parse issue being fixed independently:
+All wolfCrypt subsystems pass, including RSA and Ed25519:
 
 | Category | Tests | Status |
 |----------|-------|--------|
+| macro, error, MEMORY, base64, asn | 5 | Pass |
 | SHA (1/224/256/384/512), SHA-3 | 6 | Pass |
 | RANDOM, SHAKE128/256, Hash | 4 | Pass |
 | HMAC (SHA/224/256/384/512/SHA3) | 6 | Pass |
 | HMAC-KDF, PRF, TLSv1.3 KDF | 3 | Pass |
 | GMAC, Chacha, POLY1305, ChaPoly | 4 | Pass |
 | AES, AES192, AES256, AES-CBC, AES-GCM | 5 | Pass |
-| macro, error, MEMORY, base64, asn | 5 | Pass |
-| RSA | — | Fails at upstream ASN parse (-140) — under investigation |
-| Ed25519 | — | Fails at 3 upstream issues (see [Known Issues](#known-issues)) |
+| RSA | 1 | Pass |
+| DH, PWDBASED | 2 | Pass |
+| ECC, CURVE25519, ED25519 | 3 | Pass |
+| MLKEM, CMAC | 2 | Pass |
+| logging, time, mutex, memcb, crypto callback | 5 | Pass |
 
 ### Building manually
 
@@ -306,10 +309,6 @@ The upstream [imrank03/nxp-se050](https://github.com/imrank03/nxp-se050) Rust dr
 | Response buffers too small (16 bytes) for hash/RSA | Increase to 260 bytes |
 
 ## Known Issues
-
-- **Ed25519 wolfCrypt test vectors**: wolfCrypt's Ed25519 test fails against the simulator through a chain of upstream issues in the wolfCrypt SE050 port and the NXP SDK. Specifically: (1) `se050_ed25519_verify_msg` never resets `*res = 0` on signature-invalid, leaving stale `res=1` that breaks the bad-msg assertion; (2) `wc_ed25519_import_private_key_ex` does not reset `key->keyIdSet = 0` when the key bytes change, so a subsequent sign reuses the previous iteration's SE050-side keyId; (3) `SE05X_TLV_BUF_SIZE_CMD = 900` in the NXP SDK is too small for Ed25519 test vector 6 (~1023-byte message). None of these are simulator issues — Ed25519 correctness is independently verified via the SDK test suite's `Ed25519-test-vector` test (RFC 8032 signature byte-match). Ed25519 remains `--disable-ed25519` in the wolfCrypt build.
-
-- **RSA via wolfCrypt**: wolfCrypt's RSA test currently fails at a wolfSSL-side ASN parse error (-140) inside `se050_rsa_sign`'s DER handling. The simulator correctly handles the SDK's per-component `WriteRSAKey` sequence and `sss_asymmetric_sign_digest(NO_HASH)` path (verified by `RSA-2048-import-client-key-NO_HASH` in the SDK test suite, which embeds `wolfssl/certs/client-key.der` verbatim and signs successfully). The fix is in flight upstream in wolfSSL.
 
 - **SCP03**: Secure Channel Protocol 03 is not implemented. The simulator operates in plain (unauthenticated) mode only.
 
